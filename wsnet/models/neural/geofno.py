@@ -294,6 +294,20 @@ class GeoFNO(nn.Module):
         self.dropout = nn.Dropout(p=0.1)
         self.fc_proj2 = nn.Linear(128, out_channels)
 
+    def _compute_latent_coords(self, physical_coords: Tensor) -> Tensor:
+        """Apply learned coordinate deformation to get latent grid coordinates.
+
+        Args:
+        - physical_coords (Tensor): Normalized node coordinates in [-1, 1].
+                                    Shape (batch_size, num_nodes, spatial_dim).
+
+        Returns:
+        - Tensor: Latent coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
+        """
+        if self.spatial_dim > 1 and self.deformation_net is not None:
+            return torch.clamp(self.deformation_net(physical_coords), -1.0, 1.0)
+        return physical_coords
+
     def _p2g_sample(self, features: Tensor, latent_coords: Tensor) -> Tensor:
         """
         Point-to-Grid (P2G) Encoding: Maps unstructured features to a regular grid using
@@ -383,99 +397,89 @@ class GeoFNO(nn.Module):
             return sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)
 
         elif self.spatial_dim == 2:
-            coords_input = latent_coords.view(batch_size, num_nodes, 1, 2)
+            # F.grid_sample expects coords in (x, y) = (W-axis, H-axis) order,
+            # but latent_coords are stored as (dim0=H, dim1=W). Flip last dim.
+            coords_input = latent_coords[..., [1, 0]].view(batch_size, num_nodes, 1, 2)
             sampled = F.grid_sample(grid_features, coords_input, align_corners=True, padding_mode='border')
             return sampled.squeeze(-1).permute(0, 2, 1)
 
         elif self.spatial_dim == 3:
-            coords_input = latent_coords.view(batch_size, num_nodes, 1, 1, 3)
+            # F.grid_sample expects coords in (x, y, z) = (W, H, D) order,
+            # but latent_coords are stored as (dim0=D, dim1=H, dim2=W). Reverse last dim.
+            coords_input = latent_coords[..., [2, 1, 0]].view(batch_size, num_nodes, 1, 1, 3)
             sampled = F.grid_sample(grid_features, coords_input, align_corners=True, padding_mode='border')
             return sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)
 
-    def forward(self, input_features: Tensor, physical_coords: Tensor) -> Tensor:
+    def forward(self, input_features: Tensor, physical_coords: Tensor,
+                latent_coords: Optional[Tensor] = None) -> Tensor:
         """
         Geo-FNO forward pass.
 
         Args:
         - input_features (Tensor): Input fields at nodes. Shape (batch_size, num_nodes, in_channels)
-        - physical_coords (Tensor): Normalized coordinates of nodes, EXPECTED IN RANGE [-1, 1].
-                                    Shape (batch_size, num_nodes, spatial_dim)
+        - physical_coords (Tensor): Normalized coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim)
+        - latent_coords (Optional[Tensor]): Pre-computed deformed coordinates in [-1, 1].
+                                            Shape (batch_size, num_nodes, spatial_dim). If None, computed
+                                            internally via deformation_net. Pass a cached
+                                            value from _compute_latent_coords() to avoid
+                                            redundant deformation network calls during rollout.
 
         Returns:
         - Tensor: Prediction at nodes. Shape (batch_size, num_nodes, out_channels)
         """
-        # 1. Lifting (P) and Deformation
-        # # Shape: (batch_size, num_nodes, in_channels + spatial_dim)
-        # input_lift = torch.cat([input_features, physical_coords], dim=-1)
-        # # Shape: (batch_size, num_nodes, width)
-        # lifted_features = self.fc_lift(input_lift)
-
-        # Shape: (batch_size, num_nodes, width)
+        # 1. Lifting (P)
         lifted_features = self.fc_lift(input_features)
 
-        if self.spatial_dim > 1 and self.deformation_net is not None:
-            # Shape: (batch_size, num_nodes, spatial_dim)
-            latent_coords = self.deformation_net(physical_coords)
-            latent_coords = torch.clamp(latent_coords, -1.0, 1.0)
-        else:
-            latent_coords = physical_coords
+        # 2. Coordinate deformation (use cached value if provided)
+        if latent_coords is None:
+            latent_coords = self._compute_latent_coords(physical_coords)
 
-        # 2. Point-to-Grid (P2G) Encoding
-        # Shape: (batch_size, width, len_x, (len_y), (len_z))
+        # 3. Point-to-Grid (P2G) Encoding
         grid_features = self._p2g_sample(lifted_features, latent_coords)
 
-        # 3. FNO Processing (Latent Space Convolution)
+        # 4. FNO Processing (Latent Space Convolution)
         for block in self.fno_blocks:
-            # Shape: (batch_size, width, len_x, (len_y), (len_z))
             grid_features = block(grid_features)
 
-        # 4. Grid-to-Point (G2P) Decoding
-        # Shape: (batch_size, num_nodes, width)
+        # 5. Grid-to-Point (G2P) Decoding
         recovered_features = self._g2p_sample(grid_features, latent_coords)
 
-        # 5. Projection (Q)
-        # Shape: (batch_size, num_nodes, out_channels)
+        # 6. Projection (Q)
         output = self.fc_proj1(recovered_features)
         output = F.gelu(output)
         output = self.dropout(output)
         output = self.fc_proj2(output)
-
-        # 6. Global Residual Connection
-        # if input_features.shape[-1] == output.shape[-1]:
-        #     output = input_features + output
 
         return output
 
     def predict(self, initial_state: Tensor, coords: Tensor, steps: int) -> Tensor:
         """
         Autoregressive inference for time-dependent PDE evolution.
-        Generates a sequence of future states based on the initial condition.
+
+        Note: caller must set model.eval() before calling this method.
 
         Args:
-        - initial_state (Tensor): The state at t=0. Shape (batch_size, num_nodes, in_channels)
-        - coords (Tensor): Coordinates of nodes, EXPECTED IN RANGE [-1, 1]. Shape (batch_size, num_nodes, spatial_dim)
-        - steps (int): Number of future time steps to generate.
+        - initial_state (Tensor): State at t=0. Shape (batch_size, num_nodes, in_channels)
+        - coords (Tensor): Node coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim)
+        - steps (int): Number of future steps to generate.
 
         Returns:
-        - Tensor: Predicted sequence. Shape (batch_size, steps + 1, num_nodes, out_channels).
+        - Tensor: Predicted sequence. Shape (batch_size, steps+1, num_nodes, out_channels).
         """
-        self.eval()
         device = next(self.parameters()).device
         current_state = initial_state.to(device)
         coords = coords.to(device)
 
-        # Storage for the sequence
+        # Pre-compute latent coords once: physical_coords are constant across steps,
+        # and deformation_net weights are fixed during inference.
+        latent_coords = self._compute_latent_coords(coords)
+
         seq: List[Tensor] = [current_state.cpu()]
 
         with torch.no_grad():
             for _ in tqdm(range(steps), desc='Predicting', leave=False, dynamic_ncols=True):
-                # Forward pass: state_t -> state_{t+1}
-                next_state = self.forward(current_state, coords)
-
-                # Store prediction
+                next_state = self.forward(current_state, coords, latent_coords=latent_coords)
                 seq.append(next_state.cpu())
-
-                # Update state for next iteration
                 current_state = next_state
 
         return torch.stack(seq, dim=1)

@@ -258,9 +258,10 @@ class SpatioTemporalEncoder(nn.Module):
     def encode_space(self, coords: Tensor) -> Tensor:
         """
         Args:
-            coords: (B, N, spatial_dim) in [-1, 1]
+        - coords (Tensor): Normalized node coordinates in [-1, 1].
+                           Shape (batch_size, num_nodes, spatial_dim)
         Returns:
-            (B, N, 2*rff_features)
+        - Tensor: RFF spatial embedding. Shape (batch_size, num_nodes, 2*rff_features)
         """
         proj = 2.0 * math.pi * (coords @ self.B_matrix)  # (B, N, rff_features)
         return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
@@ -268,9 +269,9 @@ class SpatioTemporalEncoder(nn.Module):
     def encode_time(self, step: int, B: int, N: int, device: torch.device) -> Tensor:
         """
         Args:
-            step: integer time step
+        - step (int): Integer time step index.
         Returns:
-            (B, N, 2*time_features)
+        - Tensor: Sinusoidal temporal embedding. Shape (batch_size, num_nodes, 2*time_features)
         """
         t = torch.tensor(float(step), device=device)
         angles = self.omega * t                                      # (time_features,)
@@ -545,6 +546,24 @@ class GeoWNO(nn.Module):
         self.register_buffer('grid_centers', centers)
 
     # ------------------------------------------------------------------
+    # Latent Coordinate Computation
+    # ------------------------------------------------------------------
+
+    def _compute_latent_coords(self, physical_coords: Tensor) -> Tensor:
+        """Apply learned coordinate deformation to get latent grid coordinates.
+
+        Args:
+        - physical_coords (Tensor): Normalized node coordinates in [-1, 1].
+                                    Shape (batch_size, num_nodes, spatial_dim).
+
+        Returns:
+        - Tensor: Latent coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
+        """
+        if self.spatial_dim > 1 and self.deformation_net is not None:
+            return torch.clamp(self.deformation_net(physical_coords), -1.0, 1.0)
+        return physical_coords
+
+    # ------------------------------------------------------------------
     # KNN-IDW Point-to-Grid
     # ------------------------------------------------------------------
 
@@ -555,11 +574,11 @@ class GeoWNO(nn.Module):
         Uses chunked torch.cdist to bound per-chunk memory.
 
         Args:
-            features: Lifted node features. Shape (B, N, W).
-            latent_coords: Deformed coordinates in [-1,1]. Shape (B, N, spatial_dim).
+            features: Lifted node features. Shape (batch_size, num_nodes, width).
+            latent_coords: Deformed coordinates in [-1,1]. Shape (batch_size, num_nodes, spatial_dim).
 
         Returns:
-            Grid features. Shape (B, W, G1, (G2), (G3)).
+            Grid features. Shape (batch_size, width, G1, (G2), (G3)).
         """
         B, N, W = features.shape
         device = features.device
@@ -607,11 +626,11 @@ class GeoWNO(nn.Module):
         Grid-to-Point decoding using bilinear/trilinear interpolation (F.grid_sample).
 
         Args:
-            grid_features: (B, W, G1, (G2), (G3))
-            latent_coords: (B, N, spatial_dim) in [-1, 1]
+            grid_features: (batch_size, width, G1, (G2), (G3))
+            latent_coords: (batch_size, num_nodes, spatial_dim) in [-1, 1]
 
         Returns:
-            (B, N, W)
+            (batch_size, num_nodes, width)
         """
         B, N, _ = latent_coords.shape
 
@@ -623,12 +642,16 @@ class GeoWNO(nn.Module):
             return sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)
 
         elif self.spatial_dim == 2:
-            coords_input = latent_coords.view(B, N, 1, 2)
+            # F.grid_sample expects coords in (x, y) = (W-axis, H-axis) order,
+            # but latent_coords are stored as (dim0=H, dim1=W). Flip last dim.
+            coords_input = latent_coords[..., [1, 0]].view(B, N, 1, 2)
             sampled = F.grid_sample(grid_features, coords_input, align_corners=True, padding_mode='border')
             return sampled.squeeze(-1).permute(0, 2, 1)
 
         elif self.spatial_dim == 3:
-            coords_input = latent_coords.view(B, N, 1, 1, 3)
+            # F.grid_sample expects coords in (x, y, z) = (W, H, D) order,
+            # but latent_coords are stored as (dim0=D, dim1=H, dim2=W). Reverse last dim.
+            coords_input = latent_coords[..., [2, 1, 0]].view(B, N, 1, 1, 3)
             sampled = F.grid_sample(grid_features, coords_input, align_corners=True, padding_mode='border')
             return sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)
 
@@ -636,17 +659,22 @@ class GeoWNO(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, input_features: Tensor, physical_coords: Tensor, step: int = 0) -> Tensor:
+    def forward(self, input_features: Tensor, physical_coords: Tensor, step: int = 0,
+                latent_coords: Optional[Tensor] = None) -> Tensor:
         """
         Geo-WNO forward pass.
 
         Args:
-            input_features: Node features at t. Shape (B, N, in_channels).
-            physical_coords: Normalized coordinates in [-1, 1]. Shape (B, N, spatial_dim).
+            input_features: Node features at t. Shape (batch_size, num_nodes, in_channels).
+            physical_coords: Normalized coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
             step: Integer time step for temporal encoding. Default 0.
+            latent_coords: Pre-computed deformed coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
+                           If None, computed internally via deformation_net. Pass a cached
+                           value from _compute_latent_coords() to avoid redundant deformation
+                           network calls during rollout inference.
 
         Returns:
-            Predicted node features. Shape (B, N, out_channels).
+            Predicted node features. Shape (batch_size, num_nodes, out_channels).
         """
         B, N, _ = physical_coords.shape
         device = physical_coords.device
@@ -659,11 +687,9 @@ class GeoWNO(nn.Module):
         cat_input = torch.cat([input_features, space_emb, time_emb], dim=-1)
         lifted = self.fc_lift(cat_input)  # (B, N, width)
 
-        # 3. Coordinate deformation
-        if self.spatial_dim > 1 and self.deformation_net is not None:
-            latent_coords = torch.clamp(self.deformation_net(physical_coords), -1.0, 1.0)
-        else:
-            latent_coords = physical_coords
+        # 3. Coordinate deformation (use cached value if provided)
+        if latent_coords is None:
+            latent_coords = self._compute_latent_coords(physical_coords)
 
         # 4. KNN-P2G: nodes -> regular latent grid
         grid_features = self._p2g_knn(lifted, latent_coords)  # (B, W, G1, ...)
@@ -683,26 +709,31 @@ class GeoWNO(nn.Module):
 
     def predict(self, initial_state: Tensor, coords: Tensor, steps: int) -> Tensor:
         """
-        Autoregressive inference (same interface as GeoFNO.predict).
+        Autoregressive inference.
+
+        Note: caller must set model.eval() before calling this method.
 
         Args:
-            initial_state: State at t=0. Shape (B, N, in_channels).
-            coords: Node coordinates in [-1, 1]. Shape (B, N, spatial_dim).
+            initial_state: State at t=0. Shape (batch_size, num_nodes, in_channels).
+            coords: Node coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
             steps: Number of future steps to generate.
 
         Returns:
-            Predicted sequence. Shape (B, steps+1, N, out_channels).
+            Predicted sequence. Shape (batch_size, steps+1, num_nodes, out_channels).
         """
-        self.eval()
         device = next(self.parameters()).device
         current_state = initial_state.to(device)
         coords = coords.to(device)
+
+        # Pre-compute latent coords once: physical_coords are constant across steps,
+        # and deformation_net weights are fixed during inference.
+        latent_coords = self._compute_latent_coords(coords)
 
         seq: List[Tensor] = [current_state.cpu()]
 
         with torch.no_grad():
             for t in tqdm(range(steps), desc='Predicting', leave=False, dynamic_ncols=True):
-                next_state = self.forward(current_state, coords, step=t)
+                next_state = self.forward(current_state, coords, step=t, latent_coords=latent_coords)
                 seq.append(next_state.cpu())
                 current_state = next_state
 

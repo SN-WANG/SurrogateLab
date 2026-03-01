@@ -32,10 +32,6 @@ from wsnet.utils.seeder import seed_everything
 from wsnet.utils.hue_logger import hue, logger
 
 
-# Log-pressure reference (Pa): p_log = log1p(p / LOG_P_REF)
-LOG_P_REF: float = 1e5
-
-
 # ======================================================================
 # 1. Dataset Wrapper with Scalers
 # ======================================================================
@@ -159,15 +155,6 @@ def train_pipeline(args: argparse.Namespace) -> None:
         # curriculum params
         max_rollout_steps=args.max_rollout_steps, rollout_patience=args.rollout_patience,
         noise_std_init=args.noise_std_init, noise_decay=args.noise_decay,
-        # gradient clipping
-        max_grad_norm=args.max_grad_norm,
-        # physics params
-        use_physics_loss=args.use_physics_loss,
-        lambda_physics=args.lambda_physics,
-        lambda_mass=args.lambda_mass,
-        lambda_momentum=args.lambda_momentum,
-        lambda_energy=args.lambda_energy,
-        latent_grid_size=args.latent_grid_size,
     )
 
     trainer.fit(train_loader, val_loader)
@@ -340,14 +327,19 @@ def probe_pipeline(args: argparse.Namespace) -> None:
 
     input_state = seq_std[:, 0]
     loss = torch.tensor(0.0, device=device)
-    for t in range(args.max_rollout_steps):
+    # Probe mirrors the trainer's _compute_loss exactly:
+    # full BPTT (no detach) + linear step weights (sum = 1, no extra division needed)
+    k = args.max_rollout_steps
+    total_weight = k * (k + 1)
+    for t in range(k):
         if hasattr(model, "time_encoder"):
             pred = model(input_state, coords_norm, step=t)
         else:
             pred = model(input_state, coords_norm)
-        loss = loss + criterion(pred, seq_std[:, t + 1])
-        input_state = pred.detach()
-    (loss / args.max_rollout_steps).backward()
+        w_t = 2.0 * (t + 1) / total_weight
+        loss = loss + w_t * criterion(pred, seq_std[:, t + 1])
+        input_state = pred  # full BPTT: no detach
+    loss.backward()
     optimizer.step()
 
     # --- 4. VRAM Report ---

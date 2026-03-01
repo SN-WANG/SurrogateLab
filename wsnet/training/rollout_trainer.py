@@ -1,4 +1,4 @@
-# Rollout Trainer with Pushforward Rollout and Curriculum Learning
+# Rollout Trainer with Weighted Full-Rollout and Curriculum Learning
 # Author: Shengning Wang
 
 import torch
@@ -9,26 +9,37 @@ from typing import Any
 
 from wsnet.training.base_trainer import BaseTrainer
 from wsnet.training.base_criterion import NMSECriterion
-from wsnet.training.flow_criterion import FlowCriterion
 from wsnet.utils.hue_logger import hue, logger
 
 
 class RolloutTrainer(BaseTrainer):
     """
-    Trainer for autoregressive sequence generation with pushforward rollout and noise injection.
+    Trainer for autoregressive sequence prediction with weighted full-rollout and curriculum learning.
 
-    Assume the model follows an autoregressive pattern: x_{t+1} = model(x_t, conditions).
+    Assumes the model follows an autoregressive pattern: x_{t+1} = model(x_t, conditions).
 
-    Key features:
-    1. Multi-step pushforward: Unrolls the model for k steps during training.
-    2. Noise injection: Adds Gaussian noise to inputs to improve stability.
-    3. Curriculum schedule: Dynamically adjusts rollout steps and noise deviation during training.
+    Training strategy:
+    - Full BPTT rollout: gradients flow through all rollout steps without detach. The
+      cross-step Jacobian product teaches the model that early prediction errors are
+      amplified at later steps — critical for high-pressure, nonlinear flow regimes.
+    - Noise injection: adds Gaussian noise to each step's input to expose the model to
+      the realistic input distribution it faces during inference (partially addresses the
+      distribution shift between training and inference inputs).
+    - Linear step weighting: loss at step t is weighted by w_t = 2t / (k*(k+1)), so
+      later steps contribute proportionally more to the total gradient signal.
+      This emphasizes long-range accuracy over short-step accuracy, consistent with the
+      deployment objective of stable 1000-step autoregressive prediction.
+    - Curriculum schedule: rollout steps increase by 1 every `rollout_patience` epochs,
+      starting from 1. Noise std is decayed multiplicatively at each curriculum advance.
+
+    Loss formulation (k = current_rollout_steps):
+        L = sum_{t=1}^{k} w_t * NMSE(x_hat_t, x_t),   w_t = 2t / (k*(k+1))
 
     Configs:
     1. Default optimizer: AdamW
     2. Default scheduler: CosineAnnealingLR
-    3. Default criterion: NMSE + Physics Informed Penalty
-    4. Default curriculum: Adapts rollout steps and noise deviation based on val loss stability
+    3. Default criterion: NMSECriterion (per-channel normalized MSE)
+    4. Curriculum: epoch-counter-based (not loss-based), advances every rollout_patience epochs
     """
 
     def __init__(self, model: nn.Module,
@@ -36,71 +47,46 @@ class RolloutTrainer(BaseTrainer):
                  lr: float = 1e-3, max_epochs: int = 500,
                  weight_decay: float = 1e-5, eta_min: float = 1e-6,
                  # curriculum params
-                 max_rollout_steps: int = 5, rollout_patience: int = 10,
+                 max_rollout_steps: int = 5, rollout_patience: int = 40,
                  noise_std_init: float = 0.05, noise_decay: float = 0.9,
-                 # physics params
-                 use_physics_loss: bool = False,
-                 lambda_physics: float = 0.1,
-                 lambda_mass: float = 1.0, lambda_momentum: float = 1.0, lambda_energy: float = 1.0,
-                 latent_grid_size: Any = None,
-                 # gradient clipping
-                 max_grad_norm: float = 1.0,
                  # base params
                  **kwargs):
         """
         Args:
             model (nn.Module): The neural network.
-            lr, weight_decay: AdamW parameters.
-            max_epochs, eta_min: CosineAnnealingLR parameters.
-            max_rollout_steps (int): Max steps for autoregressive rollout.
-            rollout_patience (int): Epochs of stable loss to trigger curriculum advance.
-            noise_std_init (float): Initial noise injection std dev.
-            noise_decay (float): Multiplier for noise when curriculum advances.
-            use_physics_loss (bool): Whether to use physics-informed loss.
-            lambda_physics (float): Weight of physics loss vs data loss.
-            lambda_mass (float): Sub-weight for mass conservation residual.
-            lambda_momentum (float): Sub-weight for momentum conservation residual.
-            lambda_energy (float): Sub-weight for energy conservation residual.
-            latent_grid_size: [G1, G2] for FD grid in physics loss.
-            max_grad_norm (float): Max norm for gradient clipping (0 = disabled).
-            **kwargs: Arguments passed to BaseTrainer.
+            lr (float): Initial learning rate for AdamW.
+            max_epochs (int): Total training epochs; sets CosineAnnealingLR period.
+            weight_decay (float): L2 regularization coefficient for AdamW.
+            eta_min (float): Minimum learning rate for cosine annealing.
+            max_rollout_steps (int): Maximum autoregressive rollout steps (curriculum ceiling).
+            rollout_patience (int): Number of epochs between curriculum advances.
+            noise_std_init (float): Initial std dev of Gaussian noise injected into inputs.
+            noise_decay (float): Multiplicative decay applied to noise_std at each curriculum advance.
+            **kwargs: Passed to BaseTrainer (e.g., scalers, output_dir, device, criterion).
         """
 
-        # 1. Initialize BaseTrainer with defaults
+        # 1. Initialize BaseTrainer defaults
         optimizer = kwargs.pop("optimizer", None)
         scheduler = kwargs.pop("scheduler", None)
         criterion = kwargs.pop("criterion", None)
 
-        # default optimizer: AdamW
         if optimizer is None:
             optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-        # default scheduler: CosineAnnealingLR
         if scheduler is None:
             scheduler = CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=eta_min)
 
-        # default criterion: pure data-driven or physics-informed
         if criterion is None:
-            if use_physics_loss:
-                criterion = FlowCriterion(
-                    lambda_physics=lambda_physics,
-                    lambda_mass=lambda_mass,
-                    lambda_momentum=lambda_momentum,
-                    lambda_energy=lambda_energy
-                )
-            else:
-                criterion = NMSECriterion()
+            criterion = NMSECriterion()
 
         super().__init__(model, lr=lr, max_epochs=max_epochs,
                          optimizer=optimizer, scheduler=scheduler, criterion=criterion, **kwargs)
 
-        # 2. Store hyperparameters
+        # 2. Store curriculum hyperparameters
         self.max_rollout_steps = max_rollout_steps
         self.rollout_patience = rollout_patience
         self.noise_std_init = noise_std_init
         self.noise_decay = noise_decay
-        self.latent_grid_size = latent_grid_size
-        self.max_grad_norm = max_grad_norm
 
         # 3. Initialize curriculum state
         self.rollout_counter = 0
@@ -110,8 +96,11 @@ class RolloutTrainer(BaseTrainer):
 
     def _update_curriculum(self) -> None:
         """
-        Update curriculum state.
-        Strategy: If loss stablizes, we increase difficulty (steps) and decrease assistance (noise).
+        Advance curriculum state every rollout_patience epochs.
+
+        Strategy: increase rollout difficulty (more steps) and decrease training
+        assistance (less noise). The epoch counter resets after each advance so
+        the model has a fixed number of epochs to stabilize at each difficulty level.
         """
         self.rollout_counter += 1
 
@@ -129,48 +118,54 @@ class RolloutTrainer(BaseTrainer):
             self.log_update_info = False
 
     def _on_epoch_end(self, train_loss=None, val_loss=None) -> None:
-        """
-        Updates the curriculum parameters based at the start of each epoch.
-        """
+        """Advance curriculum state at the end of each epoch."""
         self._update_curriculum()
 
     def _compute_loss(self, batch: Any) -> Tensor:
         """
-        Computes the pushforward rollout loss with noise injection.
+        Compute weighted full-rollout loss with noise injection.
 
-        Steps:
-        1. parse augmented "super batch"
-        2. initialize state x_0
-        3. pushforward rollout:
-            a. inject noise: tilde_x_t = x_t + epsilon
-            b. predict: hat_x_t+1 = f(tilde_x_t)
-            c. compute loss: L_t = loss(hat_x_t+1, gt_x_t+1)
-            d. update state: x_t+1 = hat_x_t+1
+        Algorithm:
+        1. Parse batch: (seq, coords).
+        2. Initialize rollout state from x_0.
+        3. For each step t in {1, ..., k}:
+            a. Noise injection: noisy_input = x_t + eps  (training only, eps ~ N(0, sigma^2))
+            b. Predict: x_hat_{t+1} = f(noisy_input, coords, [step=t])
+            c. Accumulate: L += w_t * criterion(x_hat_{t+1}, x_{t+1})
+            d. State update: x_{t+1} = x_hat_{t+1}  (full BPTT — no detach)
+
+        Linear step weights w_t = 2t / (k*(k+1)) for t in {1, ..., k}:
+            - sum(w_t) = 1 (normalized)
+            - w_k / w_1 = k  (last step weighted k times the first step)
+            - Rationale: deployment objective is long-horizon accuracy; the model
+              should not sacrifice step-k stability for marginally better step-1 loss.
 
         Args:
-        - batch (Any): Data batch containing sequence and optionally coords.
-                       Sequence shape: (batch_size * win_size, win_len, num_nodes, num_channels)
-                       Coordinates shape: (batch_size * win_size, num_nodes, spatial_dim)
+            batch: Tuple (seq, coords) where
+                   seq shape: (batch_size, win_len, num_nodes, num_channels)
+                   coords shape: (batch_size, num_nodes, spatial_dim) or None.
 
         Returns:
-        - Tensor: Scalar loss averaged over rollout steps. Shape (1,)
+            Scalar weighted loss. Shape: ()
         """
 
-        # 1. parse augmented "super batch"
         seq, coords = batch
 
-        # 2. intialize state x_0
-        input_state = seq[:, 0]  # t = 0
+        k = self.current_rollout_steps
+
+        # Linear step weights: w_t = 2t / (k*(k+1)), t = 1..k (sum = 1)
+        total_weight = k * (k + 1)
+        step_weights = [2.0 * (t + 1) / total_weight for t in range(k)]
+
+        input_state = seq[:, 0]
         loss = torch.tensor(0.0, device=self.device)
 
-        # 3. pushforward rollout
-        for t in range(self.current_rollout_steps):
-            # a. inject noise
-            clean_input = input_state
+        for t in range(k):
+            # a. Noise injection (training only, skip if std is negligible)
             if self.model.training and self.current_noise_std > 1e-6:
-                input_state = clean_input + torch.randn_like(clean_input) * self.current_noise_std
+                input_state = input_state + torch.randn_like(input_state) * self.current_noise_std
 
-            # b. predict
+            # b. Forward prediction
             if coords is not None:
                 if hasattr(self.model, "time_encoder"):
                     pred_state = self.model(input_state, coords, step=t)
@@ -179,18 +174,11 @@ class RolloutTrainer(BaseTrainer):
             else:
                 pred_state = self.model(input_state)
 
-            # c. compute step loss
+            # c. Weighted loss accumulation
             target_state = seq[:, t + 1]
+            loss = loss + step_weights[t] * self.criterion(pred_state, target_state)
 
-            if isinstance(self.criterion, FlowCriterion):
-                loss += self.criterion(pred_state, target_state,
-                                       prev=clean_input,
-                                       coords=coords,
-                                       latent_grid_size=self.latent_grid_size)
-            else:
-                loss += self.criterion(pred_state, target_state)
-
-            # d. update state
+            # d. State update — full BPTT, no detach
             input_state = pred_state
 
-        return loss / self.current_rollout_steps
+        return loss

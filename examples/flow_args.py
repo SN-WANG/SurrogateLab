@@ -107,21 +107,6 @@ def get_args() -> argparse.Namespace:
                         help="Initial Std dev of Gaussian noise injected into input state.")
     parser.add_argument("--noise_decay", type=float, default=0.7,
                         help="Decay factor for noise when rollout steps increase.")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0,
-                        help="Max gradient norm for clipping (0 = disabled). "
-                             "Prevents gradient explosion in multi-step rollout.")
-
-    # Physics loss
-    parser.add_argument("--use_physics_loss", type=bool, default=True,
-                        help="Enable CompressibleFlowCriterion (NMSE + FD-based physics residuals).")
-    parser.add_argument("--lambda_physics", type=float, default=0.1,
-                        help="Weight of physics loss relative to data (NMSE) loss.")
-    parser.add_argument("--lambda_mass", type=float, default=1.0,
-                        help="Sub-weight for mass conservation (∇·v) residual.")
-    parser.add_argument("--lambda_momentum", type=float, default=1.0,
-                        help="Sub-weight for momentum (∂v/∂t + ∇p) residual.")
-    parser.add_argument("--lambda_energy", type=float, default=1.0,
-                        help="Sub-weight for energy (∂T/∂t) residual.")
 
     args = parser.parse_args()
     return args
