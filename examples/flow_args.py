@@ -75,6 +75,9 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--time_features", type=int, default=4,
                         help="[GeoWNO] Sinusoidal PE half-dim for temporal encoding"
                              "(output: 2*time_features).")
+    parser.add_argument("--max_steps", type=int, default=1000,
+                        help="[GeoWNO] Maximum time step for sinusoidal temporal frequency scaling. "
+                             "Controls frequency bandwidth of time encoding; set close to data seq_len.")
     parser.add_argument("--rff_sigma", type=float, default=1.0,
                         help="[GeoWNO] RFF projection scale. Controls spatial frequency of encoding "
                              "(1.0 = ~0.5 cycles across domain, survives KNN-IDW averaging).")

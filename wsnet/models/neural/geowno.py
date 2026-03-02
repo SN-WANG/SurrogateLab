@@ -245,6 +245,7 @@ class SpatioTemporalEncoder(nn.Module):
         super().__init__()
         self.rff_features = rff_features
         self.time_features = time_features
+        self.max_steps = max_steps
 
         # RFF projection matrix: fixed, non-trainable
         B_matrix = torch.randn(spatial_dim, rff_features) * sigma
@@ -266,17 +267,20 @@ class SpatioTemporalEncoder(nn.Module):
         proj = 2.0 * math.pi * (coords @ self.B_matrix)  # (B, N, rff_features)
         return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
 
-    def encode_time(self, step: int, B: int, N: int, device: torch.device) -> Tensor:
-        """
+    def encode_time(self, t_norm: Tensor, N: int) -> Tensor:
+        """Encode normalized time t ∈ [0, 1] with sinusoidal PE.
+
         Args:
-        - step (int): Integer time step index.
+            t_norm: Normalized frame times in [0, 1]. Shape (B,)
+            N: Number of spatial nodes (for broadcast).
         Returns:
-        - Tensor: Sinusoidal temporal embedding. Shape (batch_size, num_nodes, 2*time_features)
+            Temporal embedding. Shape (B, N, 2*time_features)
         """
-        t = torch.tensor(float(step), device=device)
-        angles = self.omega * t                                      # (time_features,)
-        emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (2*time_features,)
-        return emb.view(1, 1, -1).expand(B, N, -1)
+        # Scale [0, 1] to [0, max_steps] so frequency range matches design intent
+        scaled_t = t_norm.float() * self.max_steps              # (B,)
+        angles = self.omega.unsqueeze(0) * scaled_t.unsqueeze(1) # (B, time_features)
+        emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B, 2*time_features)
+        return emb.unsqueeze(1).expand(-1, N, -1)                # (B, N, 2*time_features)
 
 
 # ============================================================
@@ -494,6 +498,13 @@ class GeoWNO(nn.Module):
 
         assert len(modes) == len(latent_grid_size), 'modes and latent_grid_size must match in length'
         self.spatial_dim = len(modes)
+
+        min_grid = min(latent_grid_size)
+        if min_grid < 2 ** wavelet_levels:
+            raise ValueError(
+                f"wavelet_levels={wavelet_levels} too deep for latent_grid_size={latent_grid_size} "
+                f"(smallest dim {min_grid} < 2^{wavelet_levels}={2 ** wavelet_levels})"
+            )
         self.modes = modes
         self.latent_grid_size = latent_grid_size
         self.width = width
@@ -659,7 +670,7 @@ class GeoWNO(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, input_features: Tensor, physical_coords: Tensor, step: int = 0,
+    def forward(self, input_features: Tensor, physical_coords: Tensor, t_norm: Optional[Tensor] = None,
                 latent_coords: Optional[Tensor] = None) -> Tensor:
         """
         Geo-WNO forward pass.
@@ -667,7 +678,7 @@ class GeoWNO(nn.Module):
         Args:
             input_features: Node features at t. Shape (batch_size, num_nodes, in_channels).
             physical_coords: Normalized coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
-            step: Integer time step for temporal encoding. Default 0.
+            t_norm: Normalized frame times in [0, 1]. Shape (B,). If None, defaults to zeros.
             latent_coords: Pre-computed deformed coordinates in [-1, 1]. Shape (batch_size, num_nodes, spatial_dim).
                            If None, computed internally via deformation_net. Pass a cached
                            value from _compute_latent_coords() to avoid redundant deformation
@@ -677,11 +688,13 @@ class GeoWNO(nn.Module):
             Predicted node features. Shape (batch_size, num_nodes, out_channels).
         """
         B, N, _ = physical_coords.shape
-        device = physical_coords.device
+
+        if t_norm is None:
+            t_norm = torch.zeros(B, device=physical_coords.device)
 
         # 1. Spatio-temporal encoding
         space_emb = self.time_encoder.encode_space(physical_coords)   # (B, N, 2*rff)
-        time_emb = self.time_encoder.encode_time(step, B, N, device)  # (B, N, 2*time)
+        time_emb = self.time_encoder.encode_time(t_norm, N)          # (B, N, 2*time)
 
         # 2. Lifting
         cat_input = torch.cat([input_features, space_emb, time_emb], dim=-1)
@@ -722,6 +735,7 @@ class GeoWNO(nn.Module):
             Predicted sequence. Shape (batch_size, steps+1, num_nodes, out_channels).
         """
         device = next(self.parameters()).device
+        B = initial_state.shape[0]
         current_state = initial_state.to(device)
         coords = coords.to(device)
 
@@ -733,7 +747,8 @@ class GeoWNO(nn.Module):
 
         with torch.no_grad():
             for t in tqdm(range(steps), desc='Predicting', leave=False, dynamic_ncols=True):
-                next_state = self.forward(current_state, coords, step=t, latent_coords=latent_coords)
+                t_norm = torch.full((B,), t / steps, device=device)
+                next_state = self.forward(current_state, coords, t_norm=t_norm, latent_coords=latent_coords)
                 seq.append(next_state.cpu())
                 current_state = next_state
 

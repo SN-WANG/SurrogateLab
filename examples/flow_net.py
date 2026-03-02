@@ -57,8 +57,8 @@ class ScaledCFDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor]:
-        seq, coords = self.dataset[idx]
+    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, float, float]:
+        seq, coords, start_t_norm, dt_norm = self.dataset[idx]
 
         # Feature standardization (Mean/Std)
         seq_std = self.feature_scaler.transform(seq)
@@ -66,7 +66,7 @@ class ScaledCFDataset(Dataset):
         # Coordinate normalization (Min/Max -> [-1, 1])
         coords_norm = self.coord_scaler.transform(coords)
 
-        return seq_std, coords_norm
+        return seq_std, coords_norm, start_t_norm, dt_norm
 
 
 # ======================================================================
@@ -94,7 +94,7 @@ def _build_model(args: argparse.Namespace) -> torch.nn.Module:
             knn_k=args.knn_k,
             rff_features=args.rff_features,
             time_features=args.time_features,
-            max_steps=args.win_len,
+            max_steps=args.max_steps,
             rff_sigma=args.rff_sigma,
             wavelet_levels=args.wavelet_levels,
         )
@@ -180,7 +180,7 @@ def inference_pipeline(args: argparse.Namespace) -> None:
 
     # --- 1. Restore State ---
     logger.info("loading training artifacts...")
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
 
     feature_scaler = StandardScalerTensor()
     feature_scaler.load_state_dict(checkpoint["scaler_state_dict"]["feature_scaler"])
@@ -215,7 +215,7 @@ def inference_pipeline(args: argparse.Namespace) -> None:
     case_metrics: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
 
     with torch.no_grad():
-        for i, (seq_std, coords_norm) in enumerate(test_loader):
+        for i, (seq_std, coords_norm, _, _) in enumerate(test_loader):
             seq_std = seq_std.to(device)
             coords_norm = coords_norm.to(device)
 
@@ -255,10 +255,9 @@ def inference_pipeline(args: argparse.Namespace) -> None:
 
             # ------------------------------------------------------------------
 
-            if i == 0:
-                logger.info(f"rendering animation for case: {hue.b}{case_name}{hue.q}")
-                visualizer.animate_comparison(
-                    gt=gt_seq, pred=pred_seq, coords=coords_raw, case_name=case_name)
+            logger.info(f"rendering animation for case: {hue.b}{case_name}{hue.q}")
+            visualizer.animate_comparison(
+                gt=gt_seq, pred=pred_seq, coords=coords_raw, case_name=case_name)
 
 
     with open(run_dir / "test_metrics.json", "w") as f:
@@ -301,7 +300,7 @@ def probe_pipeline(args: argparse.Namespace) -> None:
     probe_loader = DataLoader(probe_dataset, batch_size=args.batch_size, shuffle=False,
                               num_workers=args.num_workers, pin_memory=True)
 
-    seq_std, coords_norm = next(iter(probe_loader))
+    seq_std, coords_norm, start_t_norm, dt_norm = next(iter(probe_loader))
     seq_std     = seq_std.to(device)
     coords_norm = coords_norm.to(device)
 
@@ -333,7 +332,8 @@ def probe_pipeline(args: argparse.Namespace) -> None:
     total_weight = k * (k + 1)
     for t in range(k):
         if hasattr(model, "time_encoder"):
-            pred = model(input_state, coords_norm, step=t)
+            t_norm = start_t_norm.to(device) + t * dt_norm.to(device)
+            pred = model(input_state, coords_norm, t_norm=t_norm)
         else:
             pred = model(input_state, coords_norm)
         w_t = 2.0 * (t + 1) / total_weight

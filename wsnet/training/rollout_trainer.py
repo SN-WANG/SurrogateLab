@@ -149,7 +149,7 @@ class RolloutTrainer(BaseTrainer):
             Scalar weighted loss. Shape: ()
         """
 
-        seq, coords = batch
+        seq, coords, start_t_norm, dt_norm = batch
 
         k = self.current_rollout_steps
 
@@ -168,7 +168,8 @@ class RolloutTrainer(BaseTrainer):
             # b. Forward prediction
             if coords is not None:
                 if hasattr(self.model, "time_encoder"):
-                    pred_state = self.model(input_state, coords, step=t)
+                    t_norm = start_t_norm + t * dt_norm  # (B,) float tensor
+                    pred_state = self.model(input_state, coords, t_norm=t_norm)
                 else:
                     pred_state = self.model(input_state, coords)
             else:

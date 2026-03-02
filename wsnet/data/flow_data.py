@@ -48,6 +48,8 @@ class FlowData(Dataset):
 
         self.seqs: List[Tensor] = []
         self.coords: List[Tensor] = []
+        self.start_ts_norm: List[float] = []
+        self.dts_norm: List[float] = []
 
         logger.info(f"initializing dataset with {hue.m}{len(case_names)}{hue.q} cases...")
 
@@ -55,7 +57,7 @@ class FlowData(Dataset):
             cache_path = self.data_dir / f"{name}.pt"
 
             if cache_path.exists() and not force_rebuild:
-                data = torch.load(cache_path)
+                data = torch.load(cache_path, weights_only=True)
             else:
                 data = self._ingest_raw_case(name, cache_path)
 
@@ -70,6 +72,10 @@ class FlowData(Dataset):
                 self.seqs.append(states_tensor)
                 self.coords.append(coords_tensor)
 
+                T = states_tensor.shape[0]
+                self.start_ts_norm.append(0.0)
+                self.dts_norm.append(1.0 / (T - 1) if T > 1 else 0.0)
+
         logger.info(f"{hue.g}dataset initialized.{hue.q} cases: {hue.m}{len(self.seqs)}{hue.q}, "
                     f"frames: {hue.m}{self.seqs[0].shape[0]}{hue.q}, "
                     f"nodes: {hue.m}{self.seqs[0].shape[1]}{hue.q}, "
@@ -78,8 +84,8 @@ class FlowData(Dataset):
     def __len__(self) -> int:
         return len(self.seqs)
 
-    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor]:
-        return self.seqs[idx], self.coords[idx]
+    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, float, float]:
+        return self.seqs[idx], self.coords[idx], self.start_ts_norm[idx], self.dts_norm[idx]
 
     def get_stats(self) -> Tuple[Tensor, Tensor]:
         """Calculates mean and std across the feature dimension (C)."""
@@ -183,14 +189,20 @@ class FlowData(Dataset):
         """Applies vectorized sliding window slicing for temporal augmentation."""
         new_seqs: List[Tensor] = []
         new_coords: List[Tensor] = []
+        new_start_ts_norm: List[float] = []
+        new_dts_norm: List[float] = []
 
         logger.info(f"augmenting dataset with {hue.m}{len(dataset)}{hue.q} cases...")
 
-        pbar = tqdm(zip(dataset.seqs, dataset.coords), total=len(dataset),
+        pbar = tqdm(zip(dataset.seqs, dataset.coords, dataset.start_ts_norm, dataset.dts_norm),
+                    total=len(dataset),
                     desc=f"[FlowData] data augmenting", leave=False, dynamic_ncols=True)
 
-        for seq, coord in pbar:
+        for seq, coord, _, _ in pbar:
             if seq.shape[0] < win_len: continue
+
+            T = seq.shape[0]
+            dt_norm = 1.0 / (T - 1) if T > 1 else 0.0
 
             # unfold seq: (win_size, win_len, num_nodes, num_channels)
             unfolded = seq.unfold(0, win_len, win_stride).permute(0, 3, 1, 2)
@@ -198,16 +210,19 @@ class FlowData(Dataset):
             for i in range(unfolded.shape[0]):
                 new_seqs.append(unfolded[i])
                 new_coords.append(coord)
+                new_start_ts_norm.append(i * win_stride * dt_norm)
+                new_dts_norm.append(dt_norm)
 
         # shuffle across all cases
-        combined = list(zip(new_seqs, new_coords))
+        combined = list(zip(new_seqs, new_coords, new_start_ts_norm, new_dts_norm))
         rng = np.random.default_rng(seed=42)
         rng.shuffle(combined)
 
-        # update the FlowData object internal buffers
-        dataset.seqs, dataset.coords = zip(*combined) if combined else ([], [])
+        dataset.seqs, dataset.coords, dataset.start_ts_norm, dataset.dts_norm = zip(*combined)
         dataset.seqs = list(dataset.seqs)
         dataset.coords = list(dataset.coords)
+        dataset.start_ts_norm = list(dataset.start_ts_norm)
+        dataset.dts_norm = list(dataset.dts_norm)
 
         logger.info(f"{hue.g}data augmented.{hue.q} cases: {hue.m}{len(dataset)}{hue.q}, "
                     f"frames: {hue.m}{dataset.seqs[0].shape[0]}{hue.q}, "
