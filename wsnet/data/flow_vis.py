@@ -67,8 +67,8 @@ class FlowVis:
         spatial_dim: int = 2,
         fps: int = 30,
         theme: str = 'document',
-        window_width: int = 2400,
-        subplot_height: int = 250,
+        window_width: int = 3600,
+        subplot_height: int = 350,
     ) -> None:
         """
         Args:
@@ -76,8 +76,8 @@ class FlowVis:
             spatial_dim:    Spatial dimensionality (2 or 3).
             fps:            Frames per second for output video.
             theme:          PyVista theme ('document', 'paraview', 'dark').
-            window_width:   Total window width in pixels (for comparison layout).
-            subplot_height: Pixel height per channel row.
+            window_width:   Total window width in pixels (for comparison layout). Default 3600.
+            subplot_height: Minimum pixel height per channel row. Default 350.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,9 +168,8 @@ class FlowVis:
 
         col_width = self.window_width // num_cols
         subplot_h = max(int(col_width / aspect), 80)
-        # clamp height to reasonable range
-        subplot_h = min(subplot_h, self.subplot_height)
-        subplot_h = max(subplot_h, 80)
+        # enforce minimum height so the pipe cross-section is always visible
+        subplot_h = max(subplot_h, self.subplot_height)
 
         return self.window_width, subplot_h * num_channels
 
@@ -215,6 +214,17 @@ class FlowVis:
         """Colormap string for a given channel (not error column)."""
         return _CMAP[_channel_role(ch_idx, self.spatial_dim)]
 
+    def _velocity_cmap(self, lo: float, _hi: float) -> str:
+        """Choose colormap for a velocity channel based on its data range.
+
+        Returns:
+            'plasma'  for unidirectional flow (lo >= 0): sequential, no wasted blue half.
+            'RdBu_r'  for bidirectional flow (lo < 0): diverging, white at zero.
+        """
+        if lo >= 0:
+            return 'plasma'
+        return 'RdBu_r'
+
     def _scalar_bar_title(self, ch_idx: int, col: int) -> str:
         """
         Scalar bar label for (channel_index, column).
@@ -232,8 +242,8 @@ class FlowVis:
         """
         Fix camera view for the active subplot.
 
-        For 2D data, sets a tight orthographic projection based on the
-        bounding box of the point cloud with minimal padding.
+        For 2D data, sets a tight orthographic projection that guarantees
+        the full bounding box is visible regardless of viewport aspect ratio.
 
         Args:
             plotter: Active plotter instance.
@@ -248,11 +258,26 @@ class FlowVis:
                 cy = (y_min + y_max) * 0.5
                 dx = (x_max - x_min) or 1.0
                 dy = (y_max - y_min) or 1.0
-                # 3% padding
-                pad = max(dx, dy) * 0.03
+
+                # Determine viewport aspect ratio from the active renderer
+                renderer = plotter.renderer
+                vp = renderer.GetViewport()  # (xmin, ymin, xmax, ymax) in [0,1]
+                win_w, win_h = plotter.window_size
+                vp_w = (vp[2] - vp[0]) * win_w
+                vp_h = (vp[3] - vp[1]) * win_h
+                vp_aspect = vp_w / max(vp_h, 1.0)
+
+                # parallel_scale = half the visible vertical extent
+                # To fit Y: scale >= dy / 2
+                # To fit X: scale >= dx / (2 * vp_aspect)
+                pad_frac = 0.06
+                scale_y = dy * (1.0 + pad_frac) * 0.5
+                scale_x = dx * (1.0 + pad_frac) / (2.0 * vp_aspect)
+                scale = max(scale_y, scale_x)
+
                 plotter.camera.focal_point = (cx, cy, 0.0)
                 plotter.camera.position = (cx, cy, 1.0)
-                plotter.camera.parallel_scale = max(dx, dy) * 0.5 + pad
+                plotter.camera.parallel_scale = scale
                 plotter.camera.parallel_projection = True
             else:
                 plotter.reset_camera()
@@ -411,10 +436,10 @@ class FlowVis:
         )
 
         sbar_args = {
-            'height': 0.55, 'width': 0.07,
-            'position_x': 0.88, 'position_y': 0.22,
-            'vertical': True, 'fmt': '%.2e',
-            'title_font_size': 9, 'label_font_size': 8,
+            'height': 0.06, 'width': 0.60,
+            'position_x': 0.20, 'position_y': 0.05,
+            'vertical': False, 'fmt': '%.2e',
+            'title_font_size': 12, 'label_font_size': 11,
         }
 
         meshes: List[pv.PolyData] = []
@@ -425,7 +450,8 @@ class FlowVis:
 
             add_kw = dict(
                 scalars='scalar',
-                cmap=self._channel_cmap(c),
+                cmap=self._velocity_cmap(*clims[c]) if _channel_role(c, self.spatial_dim) == 'velocity' 
+                else self._channel_cmap(c),
                 clim=clims[c],
                 scalar_bar_args={**sbar_args, 'title': self._scalar_bar_title(c, 0)},
             )
@@ -517,10 +543,10 @@ class FlowVis:
         )
 
         sbar_args = {
-            'height': 0.55, 'width': 0.07,
-            'position_x': 0.88, 'position_y': 0.22,
-            'vertical': True, 'fmt': '%.2e',
-            'title_font_size': 9, 'label_font_size': 8,
+            'height': 0.06, 'width': 0.60,
+            'position_x': 0.20, 'position_y': 0.05,
+            'vertical': False, 'fmt': '%.2e',
+            'title_font_size': 12, 'label_font_size': 11,
         }
 
         col_titles = ['Ground Truth', 'Prediction', 'Abs Error']
@@ -529,7 +555,11 @@ class FlowVis:
         for c in range(num_channels):
             srcs  = [gt_vis,       pred_vis,       err_np]
             clims = [val_clims[c], val_clims[c],   err_clims[c]]
-            cmaps = [self._channel_cmap(c), self._channel_cmap(c), _CMAP['error']]
+            if _channel_role(c, self.spatial_dim) == 'velocity':
+                vc = self._velocity_cmap(*val_clims[c])
+                cmaps = [vc, vc, _CMAP['error']]
+            else:
+                cmaps = [self._channel_cmap(c), self._channel_cmap(c), _CMAP['error']]
 
             row: List[pv.PolyData] = []
             for col in range(3):
@@ -553,6 +583,8 @@ class FlowVis:
                     )
                 if c == 0:
                     plotter.add_text(col_titles[col], font_size=11, position='upper_edge')
+                if col == 0:
+                    plotter.add_text(self.ch_names[c], font_size=13, position='upper_left')
                 self._setup_camera(plotter, points)
                 row.append(mesh)
 
