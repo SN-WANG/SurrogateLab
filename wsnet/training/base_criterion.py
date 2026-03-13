@@ -34,18 +34,27 @@ class BaseCriterion(nn.Module):
 
 
 class NMSECriterion(BaseCriterion):
-    """Per-channel Normalized Mean Squared Error loss.
+    """Per-channel Normalized Mean Squared Error loss with optional channel weighting.
 
     Computes per-channel NMSE and sums across channels:
-        L = sum_c ||target_c - pred_c||^2 / (||target_c||^2 + eps)
+        L = sum_c w_c * ||target_c - pred_c||^2 / (||target_c||^2 + eps)
 
     Each channel is independently normalized by its own energy, preventing
-    high-energy channels from dominating the gradient signal.
+    high-energy channels from dominating the gradient signal. Optional
+    channel_weights allow emphasizing specific channels (e.g., up-weighting
+    a sparse Y-velocity field).
     """
 
-    def __init__(self, eps: float = 1e-8):
+    def __init__(self, eps: float = 1e-8, channel_weights: Optional[List[float]] = None):
         super().__init__()
         self.eps = eps
+        if channel_weights is not None:
+            self.register_buffer(
+                "channel_weights",
+                torch.tensor(channel_weights, dtype=torch.float32),
+            )
+        else:
+            self.channel_weights = None
 
     def forward(self, pred: Tensor, target: Tensor, **kwargs) -> Tensor:
         if pred.shape != target.shape:
@@ -56,7 +65,10 @@ class NMSECriterion(BaseCriterion):
         sq_err = (target - pred) ** 2
         mse_c = sq_err.reshape(-1, C).sum(0)              # (C,)
         norm_c = (target ** 2).reshape(-1, C).sum(0) + self.eps  # (C,)
-        return (mse_c / norm_c).sum()
+        nmse_c = mse_c / norm_c  # (C,)
+        if self.channel_weights is not None:
+            nmse_c = nmse_c * self.channel_weights.to(nmse_c.device)
+        return nmse_c.sum()
 
 
 class Metrics:

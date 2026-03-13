@@ -157,6 +157,7 @@ def _build_trainer(args: argparse.Namespace, model: torch.nn.Module,
             rollout_patience=args.rollout_patience,
             noise_std_init=args.noise_std_init, noise_decay=args.noise_decay,
             boundary_condition=boundary_condition,
+            channel_weights=args.channel_weights,
         )
 
     elif args.trainer_type == "teacher_forcing":
@@ -244,10 +245,10 @@ def inference_pipeline(args: argparse.Namespace) -> None:
     """
     device = torch.device(args.device)
     run_dir = Path(args.output_dir)
-    model_path = run_dir / "ckpt.pt"
+    model_path = run_dir / "best.pt"
 
     if not model_path.exists():
-        raise FileNotFoundError(f"ckpt.pt not found at {model_path}.")
+        raise FileNotFoundError(f"best.pt not found at {model_path}.")
 
     # --- Restore State ---
     logger.info("loading training artifacts...")
@@ -417,7 +418,7 @@ def probe_pipeline(args: argparse.Namespace) -> None:
                 f"model={hue.b}{args.model_type}{hue.q}")
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = NMSECriterion()
+    criterion = NMSECriterion(channel_weights=args.channel_weights)
 
     # --- Forward / Backward ---
     torch.cuda.reset_peak_memory_stats(device)
