@@ -58,7 +58,7 @@ def get_args() -> argparse.Namespace:
         "--win_stride", type=int, default=1,
         help="Stride for sliding window data augmentation.")
     data.add_argument(
-        "--batch_size", type=int, default=32,
+        "--batch_size", type=int, default=8,
         help="Mini-batch size for training and validation.")
     data.add_argument(
         "--num_workers", type=int, default=4,
@@ -94,7 +94,7 @@ def get_args() -> argparse.Namespace:
     # ==================================================================
     hfn = parser.add_argument_group("HyperFlowNet")
     hfn.add_argument(
-        "--num_slices", type=int, default=48,
+        "--num_slices", type=int, default=32,
         help="Number of mesh slice tokens (M). Higher M captures more physics modes.")
     hfn.add_argument(
         "--num_heads", type=int, default=8,
@@ -119,7 +119,7 @@ def get_args() -> argparse.Namespace:
 
     # Spatial encoding
     hfn.add_argument(
-        "--coord_features", type=int, default=16,
+        "--coord_features", type=int, default=8,
         help="LFF half-dimension (output: 2 * coord_features). Set 0 for raw coords.")
 
     # Temporal encoding
@@ -169,13 +169,13 @@ def get_args() -> argparse.Namespace:
     # ==================================================================
     optim = parser.add_argument_group("Optimization")
     optim.add_argument(
-        "--lr", type=float, default=1.1e-3,
+        "--lr", type=float, default=5e-4,
         help="Initial learning rate for AdamW optimizer.")
     optim.add_argument(
         "--weight_decay", type=float, default=1e-4,
         help="L2 regularization coefficient for AdamW.")
     optim.add_argument(
-        "--max_epochs", type=int, default=200,
+        "--max_epochs", type=int, default=250,
         help="Maximum number of training epochs.")
     optim.add_argument(
         "--eta_min", type=float, default=1e-6,
@@ -193,7 +193,7 @@ def get_args() -> argparse.Namespace:
         "--max_rollout_steps", type=int, default=7,
         help="Maximum autoregressive rollout steps (curriculum ceiling).")
     curriculum.add_argument(
-        "--rollout_patience", type=int, default=25,
+        "--rollout_patience", type=int, default=35,
         help="Epochs between curriculum difficulty advances.")
     curriculum.add_argument(
         "--noise_std_init", type=float, default=0.01,
