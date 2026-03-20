@@ -319,8 +319,10 @@ def inference_pipeline(args: argparse.Namespace) -> None:
             for ch in args.channel_names:
                 nmse = metrics[ch]["global"]["nmse"]
                 r2 = metrics[ch]["global"]["r2"]
+                accuracy = metrics[ch]["global"]["accuracy"]
                 log_metrics.append(
-                    f"{hue.c}{ch}:{hue.q} NMSE={hue.m}{nmse:.2e}{hue.q}, R2={hue.m}{r2:.4f}{hue.q}"
+                    f"{hue.c}{ch}:{hue.q} NMSE={hue.m}{nmse:.2e}{hue.q}, "
+                    f"R2={hue.m}{r2:.4f}{hue.q}, ACC={hue.m}{accuracy:.2f}%{hue.q}"
                 )
 
             logger.info(f"case {hue.b}{case_name}{hue.q} | " + " | ".join(log_metrics))

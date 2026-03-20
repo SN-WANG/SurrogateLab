@@ -94,7 +94,7 @@ def get_args() -> argparse.Namespace:
     # ==================================================================
     hfn = parser.add_argument_group("HyperFlowNet")
     hfn.add_argument(
-        "--num_slices", type=int, default=32,
+        "--num_slices", type=int, default=48,
         help="Number of mesh slice tokens (M). Higher M captures more physics modes.")
     hfn.add_argument(
         "--num_heads", type=int, default=8,
@@ -119,7 +119,7 @@ def get_args() -> argparse.Namespace:
 
     # Spatial encoding
     hfn.add_argument(
-        "--coord_features", type=int, default=8,
+        "--coord_features", type=int, default=16,
         help="LFF half-dimension (output: 2 * coord_features). Set 0 for raw coords.")
 
     # Temporal encoding

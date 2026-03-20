@@ -81,7 +81,7 @@ class Metrics:
     for each channel in multivariate predictions.
     """
 
-    SUPPORTED_METRICS = ("nmse", "mse", "rmse", "mae", "r2", "max_error")
+    SUPPORTED_METRICS = ("nmse", "mse", "rmse", "mae", "r2", "accuracy", "max_error")
 
     def __init__(self, channel_names: List[str], metrics: Optional[List[str]] = None):
         if metrics is None:
@@ -132,6 +132,7 @@ class Metrics:
 
             # Global metrics (aggregate over all timesteps and nodes)
             abs_diff = torch.abs(target_c - pred_c)
+            abs_target = torch.abs(target_c)
             sq_diff = (target_c - pred_c) ** 2
 
             for metric_name in self.metrics:
@@ -152,6 +153,11 @@ class Metrics:
                     ss_tot = torch.sum((target_c - torch.mean(target_c)) ** 2).item()
                     r2_val = 1.0 - (ss_res / (ss_tot + 1e-8))
                     channel_result["global"][metric_name] = r2_val
+                elif metric_name == "accuracy":
+                    accuracy_val = (
+                        1.0 - torch.sum(abs_diff) / (torch.sum(abs_target) + 1e-8)
+                    ) * 100.0
+                    channel_result["global"][metric_name] = accuracy_val.item()
                 elif metric_name == "max_error":
                     max_val = torch.max(abs_diff).item()
                     channel_result["global"][metric_name] = max_val
@@ -179,6 +185,11 @@ class Metrics:
                     channel_result["step_wise"][metric_name] = (
                         (1.0 - step_ss_res / (step_ss_tot + 1e-8)).tolist()
                     )
+                elif metric_name == "accuracy":
+                    step_accuracy = (
+                        1.0 - torch.sum(abs_diff, dim=1) / (torch.sum(abs_target, dim=1) + 1e-8)
+                    ) * 100.0
+                    channel_result["step_wise"][metric_name] = step_accuracy.tolist()
                 elif metric_name == "max_error":
                     channel_result["step_wise"][metric_name] = torch.max(
                         abs_diff, dim=1
