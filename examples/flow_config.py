@@ -52,7 +52,7 @@ def get_args() -> argparse.Namespace:
         "--spatial_dim", type=int, default=2, choices=[2, 3],
         help="Spatial dimensionality of the mesh (2D or 3D).")
     data.add_argument(
-        "--win_len", type=int, default=11,
+        "--win_len", type=int, default=16,
         help="Temporal window length for sequence slicing (input + target).")
     data.add_argument(
         "--win_stride", type=int, default=1,
@@ -63,6 +63,15 @@ def get_args() -> argparse.Namespace:
     data.add_argument(
         "--num_workers", type=int, default=4,
         help="Number of DataLoader worker subprocesses.")
+    data.add_argument(
+        "--pin_memory", action=argparse.BooleanOptionalAction, default=True,
+        help="Pin host memory in DataLoader for faster CUDA transfers.")
+    data.add_argument(
+        "--persistent_workers", action=argparse.BooleanOptionalAction, default=True,
+        help="Keep DataLoader workers alive across epochs when num_workers > 0.")
+    data.add_argument(
+        "--prefetch_factor", type=int, default=4,
+        help="Number of batches prefetched by each DataLoader worker.")
 
     # ==================================================================
     # 3. Model Selection
@@ -175,7 +184,7 @@ def get_args() -> argparse.Namespace:
         "--weight_decay", type=float, default=1e-4,
         help="L2 regularization coefficient for AdamW.")
     optim.add_argument(
-        "--max_epochs", type=int, default=360,
+        "--max_epochs", type=int, default=700,
         help="Maximum number of training epochs.")
     optim.add_argument(
         "--eta_min", type=float, default=1e-6,
@@ -186,14 +195,38 @@ def get_args() -> argparse.Namespace:
              "Default: Vy 3x weighted to improve Y-velocity prediction.")
 
     # ==================================================================
-    # 9. Curriculum Learning (Rollout Trainer Only)
+    # 9. Runtime Optimization
+    # ==================================================================
+    runtime = parser.add_argument_group("Runtime Optimization")
+    runtime.add_argument(
+        "--use_amp", action=argparse.BooleanOptionalAction, default=torch.cuda.is_available(),
+        help="Enable CUDA automatic mixed precision during training and inference.")
+    runtime.add_argument(
+        "--amp_dtype", type=str, default="bf16", choices=["bf16", "fp16"],
+        help="Autocast dtype when AMP is enabled.")
+    runtime.add_argument(
+        "--use_tf32", action=argparse.BooleanOptionalAction, default=True,
+        help="Allow TF32 matmul/cuDNN kernels on supported NVIDIA GPUs.")
+    runtime.add_argument(
+        "--use_fused_optimizer", action=argparse.BooleanOptionalAction, default=True,
+        help="Use fused AdamW on CUDA when supported by the current PyTorch build.")
+    runtime.add_argument(
+        "--use_compile", action=argparse.BooleanOptionalAction, default=False,
+        help="Compile the model with torch.compile for potentially higher throughput.")
+    runtime.add_argument(
+        "--compile_mode", type=str, default="default",
+        choices=["default", "reduce-overhead", "max-autotune"],
+        help="Compilation mode passed to torch.compile.")
+
+    # ==================================================================
+    # 10. Curriculum Learning (Rollout Trainer Only)
     # ==================================================================
     curriculum = parser.add_argument_group("Curriculum (Rollout Trainer)")
     curriculum.add_argument(
-        "--max_rollout_steps", type=int, default=10,
+        "--max_rollout_steps", type=int, default=15,
         help="Maximum autoregressive rollout steps (curriculum ceiling).")
     curriculum.add_argument(
-        "--rollout_patience", type=int, default=35,
+        "--rollout_patience", type=int, default=45,
         help="Epochs between curriculum difficulty advances.")
     curriculum.add_argument(
         "--noise_std_init", type=float, default=0.01,
