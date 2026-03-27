@@ -2,7 +2,6 @@
 # Author: Shengning Wang
 
 import os
-import sys
 import argparse
 from typing import Dict, Optional, Tuple
 
@@ -10,36 +9,33 @@ import numpy as np
 from scipy.optimize import differential_evolution, NonlinearConstraint
 from scipy.optimize import OptimizeResult
 
-import aero_config
-
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path: sys.path.insert(0, project_root)
+import abaqus_config
 
 
 # Base Surrogate Model
-from wsnet.models.classical.krg import KRG
+from models.classical.krg import KRG
 
 # Ensemble Surrogate Models
-from wsnet.models.ensemble.t_ahs import TAHS
-from wsnet.models.ensemble.aes_msi import AESMSI
+from models.ensemble.t_ahs import TAHS
+from models.ensemble.aes_msi import AESMSI
 
 # Multi-fidelity Surrogate Models
-from wsnet.models.multi_fidelity.mfs_mls import MFSMLS
-from wsnet.models.multi_fidelity.mmfs import MMFS
-from wsnet.models.multi_fidelity.cca_mfs import CCAMFS
+from models.multi_fidelity.mfs_mls import MFSMLS
+from models.multi_fidelity.mmfs import MMFS
+from models.multi_fidelity.cca_mfs import CCAMFS
 
 # Sequential Sampling Methods
-from wsnet.sampling.so_infill import SingleObjectiveInfill
-from wsnet.sampling.mf_infill import MultiFidelityInfill
-from wsnet.sampling.mo_infill import MultiObjectiveInfill
+from sampling.so_infill import SingleObjectiveInfill
+from sampling.mf_infill import MultiFidelityInfill
+from sampling.mo_infill import MultiObjectiveInfill
 
 # Optimization Methods
-from wsnet.models.optimization.dragonfly import dragonfly_optimize
+from models.optimization.dragonfly import dragonfly_optimize
 
 # Tools
-from wsnet.sampling.doe import lhs_design
-from wsnet.utils.seeder import seed_everything
-from wsnet.utils.hue_logger import hue, logger
+from sampling.doe import lhs_design
+from utils.seeder import seed_everything
+from utils.hue_logger import hue, logger
 
 
 # ======================================================================
@@ -965,7 +961,7 @@ def optimization_pipeline(
 # ======================================================================
 
 if __name__ == "__main__":
-    args = aero_config.get_args()
+    args = abaqus_config.get_args()
     seed_everything(args.seed)
 
     logger.info(f"{hue.b}Aero Optimization Benchmark Platform{hue.q}")

@@ -5,38 +5,30 @@ from __future__ import annotations
 import json
 import os
 import random
-import sys
 from typing import Any, Dict, List
 
 import numpy as np
 from scipy.optimize import differential_evolution
 
-CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+import bench_config as benchmark_config
+import bench_funcs as benchmark_functions
 
-import aero_benchmark_config as benchmark_config
-import aero_benchmark_functions as benchmark_functions
-
-from wsnet.models.classical.prs import PRS
-from wsnet.models.classical.rbf import RBF
-from wsnet.models.classical.krg import KRG
-from wsnet.models.classical.svr import SVR
-from wsnet.models.ensemble.t_ahs import TAHS
-from wsnet.models.ensemble.aes_msi import AESMSI
-from wsnet.models.multi_fidelity.mfs_mls import MFSMLS
-from wsnet.models.multi_fidelity.mmfs import MMFS
-from wsnet.models.multi_fidelity.cca_mfs import CCAMFS
-from wsnet.models.optimization.dragonfly import dragonfly_optimize
-from wsnet.sampling.doe import lhs_design
-from wsnet.sampling.so_infill import SingleObjectiveInfill
-from wsnet.sampling.mf_infill import MultiFidelityInfill
-from wsnet.sampling.mo_infill import MultiObjectiveInfill
-from wsnet.utils.hue_logger import hue, logger
-from wsnet.utils.seeder import seed_everything
+from models.classical.prs import PRS
+from models.classical.rbf import RBF
+from models.classical.krg import KRG
+from models.classical.svr import SVR
+from models.ensemble.t_ahs import TAHS
+from models.ensemble.aes_msi import AESMSI
+from models.multi_fidelity.mfs_mls import MFSMLS
+from models.multi_fidelity.mmfs import MMFS
+from models.multi_fidelity.cca_mfs import CCAMFS
+from models.optimization.dragonfly import dragonfly_optimize
+from sampling.doe import lhs_design
+from sampling.so_infill import SingleObjectiveInfill
+from sampling.mf_infill import MultiFidelityInfill
+from sampling.mo_infill import MultiObjectiveInfill
+from utils.hue_logger import hue, logger
+from utils.seeder import seed_everything
 
 
 def scale_to_bounds(x_norm: np.ndarray, bounds: np.ndarray) -> np.ndarray:
