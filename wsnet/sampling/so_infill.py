@@ -5,7 +5,7 @@ import numpy as np
 from scipy.stats import norm
 from typing import Union, List
 
-from wsnet.sampling.base_infill import BaseInfill
+from sampling.base_infill import BaseInfill
 
 
 class SingleObjectiveInfill(BaseInfill):

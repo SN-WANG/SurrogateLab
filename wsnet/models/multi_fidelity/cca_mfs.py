@@ -8,8 +8,8 @@ from scipy.linalg import sqrtm, inv
 from scipy.optimize import minimize, Bounds
 from typing import Dict, Optional, Tuple
 
-from wsnet.models.classical.rbf import RBF
-from wsnet.data.scaler import StandardScalerNP
+from models.classical.rbf import RBF
+from utils.scaler import StandardScalerNP
 
 
 class CCAMFS:

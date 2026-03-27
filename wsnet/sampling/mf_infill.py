@@ -6,8 +6,8 @@
 import numpy as np
 from typing import List, Optional
 
-from wsnet.sampling.base_infill import BaseInfill
-from wsnet.data.scaler import MinMaxScalerNP
+from sampling.base_infill import BaseInfill
+from utils.scaler import MinMaxScalerNP
 
 
 class MultiFidelityInfill(BaseInfill):

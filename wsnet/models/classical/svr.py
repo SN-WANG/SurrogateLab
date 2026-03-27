@@ -5,7 +5,7 @@ import numpy as np
 from scipy.optimize import minimize, Bounds
 from typing import Tuple, Optional, Literal
 
-from wsnet.data.scaler import StandardScalerNP
+from utils.scaler import StandardScalerNP
 
 
 class SVR:

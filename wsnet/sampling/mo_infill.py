@@ -9,7 +9,7 @@ from scipy.stats import norm
 from scipy.optimize import minimize, Bounds
 from typing import List, Optional
 
-from wsnet.sampling.base_infill import BaseInfill
+from sampling.base_infill import BaseInfill
 
 
 class MultiObjectiveInfill(BaseInfill):

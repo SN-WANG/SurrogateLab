@@ -7,8 +7,8 @@ import numpy as np
 from typing import Dict, Optional
 from itertools import combinations_with_replacement
 
-from wsnet.models.classical.rbf import RBF
-from wsnet.data.scaler import StandardScalerNP
+from models.classical.rbf import RBF
+from utils.scaler import StandardScalerNP
 
 
 class MFSMLS:
