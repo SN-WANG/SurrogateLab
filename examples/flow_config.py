@@ -52,7 +52,7 @@ def get_args() -> argparse.Namespace:
         "--spatial_dim", type=int, default=2, choices=[2, 3],
         help="Spatial dimensionality of the mesh (2D or 3D).")
     data.add_argument(
-        "--win_len", type=int, default=16,
+        "--win_len", type=int, default=13,
         help="Temporal window length for sequence slicing (input + target).")
     data.add_argument(
         "--win_stride", type=int, default=1,
