@@ -1,68 +1,105 @@
 # SurrogateLab
 
-SurrogateLab is a research-oriented repository for engineering surrogate modeling workflows. It focuses on classical surrogate models, multi-fidelity methods, ensemble strategies, design of experiments, and infill sampling, while keeping optimization as a downstream application rather than the repository's main identity.
+[![Role](https://img.shields.io/badge/Role-Research%20Code-0f766e)](https://github.com/SN-WANG/SurrogateLab)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-This repository is split from [WSNet](https://github.com/SN-WANG/WSNet). The git history is intentionally preserved so the lineage remains traceable, while the codebase itself keeps the existing implementation layout from the previous standalone surrogate-modeling workspace.
+**SurrogateLab** is the benchmark and experiment repository in the WSNet family. It inherits the reusable surrogate, sampling, optimization, and utility foundations from [WSNet](https://github.com/SN-WANG/WSNet), while keeping benchmark scripts and research workflows local to this repository.
 
-## Scope
+## 📌 Overview
 
-- Classical surrogate models
-- Multi-fidelity surrogate models
-- Ensemble surrogate models
-- DOE and infill sampling
-- Benchmark and Abaqus-oriented application entry points
+SurrogateLab is where algorithm comparison and experiment-facing workflow code live.
+It focuses on benchmark functions, application-style demos, and quick iteration around surrogate modeling methods.
 
-## Repository Layout
+The current scope includes:
+
+- analytic benchmark suites
+- Abaqus-style application demos
+- ensemble and multi-fidelity surrogate comparisons
+- active learning experiments
+- constrained and unconstrained optimization studies
+
+## ✨ Highlights
+
+- Classical surrogate models: `PRS`, `RBF`, `KRG`, `SVR`
+- Multi-fidelity models: `MFSMLS`, `MMFS`, `CCAMFS`
+- Ensemble models: `TAHS`, `AESMSI`
+- Sampling methods for DOE and infill
+- Global optimization helpers: `MIGA`, `CFSSDA`
+- Two main experiment entry points: `bench_main.py` and `abaqus_main.py`
+
+## 🧱 Repository Layout
 
 ```text
 SurrogateLab/
-├── abaqus_config.py
-├── abaqus_main.py
+├── bench_main.py
 ├── bench_config.py
 ├── bench_funcs.py
-├── bench_main.py
+├── abaqus_main.py
+├── abaqus_config.py
 ├── models/
 │   ├── classical/
-│   ├── multi_fidelity/
 │   ├── ensemble/
+│   ├── multi_fidelity/
 │   └── optimization/
 ├── sampling/
-└── utils/
+├── utils/
+├── README.md
+└── LICENSE
 ```
 
-## Included Modules
+## 🚀 Getting Started
 
-### Classical Models
+### Clone the repository
 
-- `PRS`
-- `RBF`
-- `KRG`
-- `SVR`
+```bash
+git clone https://github.com/SN-WANG/SurrogateLab.git
+cd SurrogateLab
+```
 
-### Multi-Fidelity Models
+### Install the dependencies you need
 
-- `CCA-MFS`
-- `MFS-MLS`
-- `MMFS`
+```bash
+pip install numpy scipy matplotlib torch tqdm
+```
 
-### Ensemble Models
+### Run the analytic benchmark suite
 
-- `T-AHS`
-- `AES-MSI`
+```bash
+python bench_main.py --demos all
+```
 
-### Sampling and Optimization
+### Run the Abaqus-style demo
 
-- DOE utilities
-- Single-objective infill
-- Multi-objective infill
-- Multi-fidelity infill
-- Dragonfly-based optimization helper
+```bash
+python abaqus_main.py --demos all --visualize
+```
 
-## Notes
+### Run only the optimization demos
 
-- The current code is kept close to the existing implementation without logic refactoring.
-- Path conventions and runtime details are preserved intentionally for later manual cleanup and validation.
+```bash
+python bench_main.py --demos I J
+python abaqus_main.py --demos I J --visualize
+```
 
-## License
+## 🔗 Relationship to WSNet
+
+SurrogateLab is built on top of [WSNet](https://github.com/SN-WANG/WSNet).
+WSNet keeps the reusable core modules, while SurrogateLab keeps the benchmark definitions, research scripts, and application-facing experiment flows.
+
+## 📚 Citation
+
+If SurrogateLab is useful in your work, please cite it as a software project.
+
+```bibtex
+@software{surrogatelab2026,
+  author = {Shengning Wang},
+  title = {SurrogateLab},
+  year = {2026},
+  url = {https://github.com/SN-WANG/SurrogateLab}
+}
+```
+
+## 📄 License
 
 This project is released under the MIT License. See [LICENSE](LICENSE) for details.

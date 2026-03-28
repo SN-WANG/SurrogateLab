@@ -1,15 +1,22 @@
-# CFSSDA Dragonfly Optimizer
+# Multi-Island Genetic Algorithm (MIGA) Optimizer
 # Code author: Shengning Wang
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, NonlinearConstraint, OptimizeResult, minimize
-from scipy.special import gamma
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 
 def _parse_bounds(bounds: Union[Bounds, Sequence[Tuple[float, float]]]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convert box bounds to lower and upper vectors.
+
+    Args:
+        bounds (Union[Bounds, Sequence[Tuple[float, float]]]): Variable bounds.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]:
+            lower (np.ndarray): Lower bounds, shape (input_dim,), dtype: float64.
+            upper (np.ndarray): Upper bounds, shape (input_dim,), dtype: float64.
     """
     if isinstance(bounds, Bounds):
         lower = np.asarray(bounds.lb, dtype=np.float64).reshape(-1)
@@ -54,6 +61,14 @@ def _repair_to_bounds(x: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np
 def _constraint_violation(x: np.ndarray, constraints: Sequence[Any], args: Tuple[Any, ...]) -> float:
     """
     Calculate the total constraint violation at one point.
+
+    Args:
+        x (np.ndarray): Candidate point, shape (input_dim,), dtype: float64.
+        constraints (Sequence[Any]): Constraint objects.
+        args (Tuple[Any, ...]): Extra objective arguments.
+
+    Returns:
+        float: Aggregated non-negative violation value.
     """
     if not constraints:
         return 0.0
@@ -187,29 +202,42 @@ def _evaluate_population(
     return objective_vectors, objective_scalars
 
 
-def _levy_flight(num_vars: int, beta: float, rng: np.random.Generator) -> np.ndarray:
+def _split_islands(num_points: int, num_islands: int) -> List[np.ndarray]:
     """
-    Generate one Levy-flight step.
+    Split the population indices into several islands.
     """
-    if not (0.0 < beta <= 2.0):
-        raise ValueError("levy_beta must be in (0, 2].")
+    base_size = num_points // num_islands
+    remainder = num_points % num_islands
+    island_sizes = np.full(num_islands, base_size, dtype=int)
+    island_sizes[:remainder] += 1
 
-    sigma_u = (
-        gamma(1.0 + beta) * np.sin(np.pi * beta / 2.0)
-        / (gamma((1.0 + beta) / 2.0) * beta * (2.0 ** ((beta - 1.0) / 2.0)))
-    ) ** (1.0 / beta)
+    if np.any(island_sizes < 4):
+        raise ValueError("Each island must contain at least 4 individuals.")
 
-    u = rng.normal(0.0, sigma_u, size=num_vars)
-    v = rng.normal(0.0, 1.0, size=num_vars)
-    return 0.01 * u / (np.abs(v) ** (1.0 / beta) + 1e-12)
+    islands = []
+    start = 0
+    for size in island_sizes:
+        islands.append(np.arange(start, start + size))
+        start += size
+
+    return islands
 
 
-def dragonfly_optimize(
+def _select_parent(indices: np.ndarray, energies: np.ndarray, tournament_size: int, rng: np.random.Generator) -> int:
+    """
+    Tournament selection.
+    """
+    candidate_size = min(tournament_size, indices.size)
+    candidate_indices = rng.choice(indices, size=candidate_size, replace=False)
+    return int(candidate_indices[np.argmin(energies[candidate_indices])])
+
+
+def multi_island_genetic_optimize(
     func: Callable,
     bounds: Union[Bounds, Sequence[Tuple[float, float]]],
     args: Tuple[Any, ...] = (),
     maxiter: int = 200,
-    popsize: int = 30,
+    popsize: int = 15,
     tol: float = 1e-6,
     seed: Optional[Union[int, np.random.Generator]] = None,
     polish: bool = False,
@@ -221,19 +249,18 @@ def dragonfly_optimize(
     return_pareto: bool = False,
     penalty_start: float = 10.0,
     penalty_growth: float = 1.05,
-    c_max: float = 2.0,
-    c_min: float = 0.2,
-    inertia_start: float = 0.9,
-    inertia_end: float = 0.2,
-    neighbor_radius_start: Optional[float] = None,
-    neighbor_radius_end: float = 0.0,
-    coulomb_alpha_mean: float = 2.0,
-    coulomb_alpha_std: float = 0.25,
-    k0: float = 1.0,
-    levy_beta: float = 1.5,
+    num_islands: int = 4,
+    migration_interval: int = 10,
+    migration_size: int = 2,
+    crossover_rate: float = 0.9,
+    mutation_rate: Optional[float] = None,
+    mutation_scale: float = 0.15,
+    elite_fraction: float = 0.1,
+    tournament_size: int = 3,
+    blend_alpha: float = 0.5,
 ) -> OptimizeResult:
     """
-    Coulomb-force-search dragonfly optimizer.
+    Multi-island genetic algorithm for continuous optimization.
 
     Args:
         func (Callable): Objective function.
@@ -252,57 +279,71 @@ def dragonfly_optimize(
         return_pareto (bool): Whether to return Pareto points.
         penalty_start (float): Initial penalty factor.
         penalty_growth (float): Penalty growth factor.
-        c_max (float): Initial behavior weight.
-        c_min (float): Final behavior weight.
-        inertia_start (float): Initial inertia weight.
-        inertia_end (float): Final inertia weight.
-        neighbor_radius_start (Optional[float]): Initial neighborhood radius.
-        neighbor_radius_end (float): Final neighborhood radius.
-        coulomb_alpha_mean (float): Mean decay factor for Coulomb search.
-        coulomb_alpha_std (float): Std decay factor for Coulomb search.
-        k0 (float): Initial Coulomb coefficient.
-        levy_beta (float): Levy-flight beta.
+        num_islands (int): Number of islands.
+        migration_interval (int): Migration interval.
+        migration_size (int): Number of migrants.
+        crossover_rate (float): BLX-alpha crossover probability.
+        mutation_rate (Optional[float]): Per-gene mutation probability.
+        mutation_scale (float): Gaussian mutation scale.
+        elite_fraction (float): Elite retention ratio.
+        tournament_size (int): Tournament size.
+        blend_alpha (float): BLX-alpha expansion coefficient.
 
     Returns:
         OptimizeResult: Optimization result.
     """
     lower, upper = _parse_bounds(bounds)
     num_vars = lower.size
-    num_pop = max(20, int(popsize) * num_vars)
     span = upper - lower
     constraints = _normalize_constraints(constraints)
 
     if maxiter < 1:
         raise ValueError("maxiter must be >= 1.")
-    if num_pop < 2:
-        raise ValueError("Population size must be >= 2.")
+    if popsize < 1:
+        raise ValueError("popsize must be >= 1.")
+    if num_islands < 1:
+        raise ValueError("num_islands must be >= 1.")
+    if migration_interval < 1:
+        raise ValueError("migration_interval must be >= 1.")
+    if migration_size < 1:
+        raise ValueError("migration_size must be >= 1.")
+    if not (0.0 < crossover_rate <= 1.0):
+        raise ValueError("crossover_rate must be in (0, 1].")
+    if mutation_scale <= 0.0:
+        raise ValueError("mutation_scale must be > 0.")
+    if not (0.0 < elite_fraction < 1.0):
+        raise ValueError("elite_fraction must be in (0, 1).")
+    if tournament_size < 2:
+        raise ValueError("tournament_size must be >= 2.")
     if penalty_start <= 0.0:
         raise ValueError("penalty_start must be > 0.")
     if penalty_growth < 1.0:
         raise ValueError("penalty_growth must be >= 1.")
-    if scalarization not in ["weighted_sum", "tchebycheff"]:
-        raise ValueError("Unsupported scalarization method.")
+    if blend_alpha < 0.0:
+        raise ValueError("blend_alpha must be >= 0.")
 
     if isinstance(seed, np.random.Generator):
         rng = seed
     else:
         rng = np.random.default_rng(seed)
 
-    if neighbor_radius_start is None:
-        neighbor_radius_start = 0.25 * float(np.linalg.norm(span))
-    neighbor_radius_start = max(neighbor_radius_start, 1e-12)
-    neighbor_radius_end = max(neighbor_radius_end, 0.0)
-
+    num_pop = max(num_islands * 4, int(popsize) * num_vars)
     population = rng.uniform(lower, upper, size=(num_pop, num_vars))
+    islands = _split_islands(num_pop, num_islands)
+
     if x0 is not None:
         x0 = np.asarray(x0, dtype=np.float64).reshape(-1)
         if x0.size != num_vars:
             raise ValueError("x0 dimension does not match bounds.")
         population[0] = np.clip(x0, lower, upper)
 
-    delta_x = rng.uniform(-0.1, 0.1, size=(num_pop, num_vars)) * span
+    if mutation_rate is None:
+        mutation_rate = 1.0 / max(num_vars, 1)
+    if not (0.0 < mutation_rate <= 1.0):
+        raise ValueError("mutation_rate must be in (0, 1].")
 
     weights = None
+
     objective_vectors, objective_scalars = _evaluate_population(
         population=population,
         func=func,
@@ -311,6 +352,7 @@ def dragonfly_optimize(
         weights=weights,
         scalarization=scalarization,
     )
+
     nfev = num_pop
 
     if multi_objective:
@@ -336,88 +378,57 @@ def dragonfly_optimize(
         archive_f.extend([row.copy() for row in objective_vectors])
         archive_v.extend([float(value) for value in violations])
 
-    best_idx = int(np.argmin(energies))
-    best_x = population[best_idx].copy()
-    best_f = objective_vectors[best_idx].copy()
-    best_fun = float(objective_scalars[best_idx])
-    best_energy = float(energies[best_idx])
+    best_index = int(np.argmin(energies))
+    best_x = population[best_index].copy()
+    best_f = objective_vectors[best_index].copy()
+    best_fun = float(objective_scalars[best_index])
+    best_energy = float(energies[best_index])
 
     message = "Maximum number of iterations reached."
     success = False
 
     for iteration in range(maxiter):
         ratio = iteration / max(maxiter - 1, 1)
-        inertia = inertia_start + (inertia_end - inertia_start) * ratio
-        behavior = c_max + (c_min - c_max) * ratio
-        neighbor_radius = neighbor_radius_start + (neighbor_radius_end - neighbor_radius_start) * ratio
+        curr_mutation_scale = mutation_scale * (1.0 - 0.75 * ratio)
+        new_population = np.empty_like(population)
 
-        curr_best = float(np.min(energies))
-        curr_worst = float(np.max(energies))
-        mass_raw = (energies - curr_worst) / (curr_best - curr_worst + 1e-12)
-        mass_raw = np.maximum(mass_raw, 1e-12)
-        mass = mass_raw / (np.sum(mass_raw) + 1e-12)
-        gamma_w = c_min + (c_max - c_min) * mass_raw
-        fit_g = gamma_w * mass
+        for island in islands:
+            island_size = island.size
+            island_order = island[np.argsort(energies[island])]
+            elite_count = max(1, int(np.ceil(elite_fraction * island_size)))
+            elite_count = min(elite_count, island_size - 2)
 
-        order = np.argsort(mass)[::-1]
-        kbest_count = max(1, int(np.ceil(num_pop - (num_pop - 1) * ratio)))
-        kbest = order[:kbest_count]
+            elites = population[island_order[:elite_count]].copy()
+            children = []
 
-        food_idx = int(np.argmin(energies))
-        enemy_idx = int(np.argmax(energies))
-        food_pos = population[food_idx]
-        enemy_pos = population[enemy_idx]
+            while len(children) < island_size - elite_count:
+                idx_a = _select_parent(island, energies, tournament_size, rng)
+                idx_b = _select_parent(island, energies, tournament_size, rng)
+                parent_a = population[idx_a]
+                parent_b = population[idx_b]
 
-        alpha_hat = abs(rng.normal(coulomb_alpha_mean, coulomb_alpha_std))
-        k_t = k0 * np.exp(-alpha_hat * (iteration + 1) / maxiter)
-        max_step = 0.2 * span
+                if rng.random() < crossover_rate:
+                    diff = np.abs(parent_a - parent_b)
+                    child_lower = np.minimum(parent_a, parent_b) - blend_alpha * diff
+                    child_upper = np.maximum(parent_a, parent_b) + blend_alpha * diff
+                    child_a = rng.uniform(child_lower, child_upper)
+                    child_b = rng.uniform(child_lower, child_upper)
+                else:
+                    child_a = parent_a.copy()
+                    child_b = parent_b.copy()
 
-        new_population = population.copy()
-        new_delta_x = delta_x.copy()
+                for child in [child_a, child_b]:
+                    mask = rng.random(num_vars) < mutation_rate
+                    if np.any(mask):
+                        sigma = np.maximum(curr_mutation_scale * span[mask], 1e-12)
+                        child[mask] += rng.normal(0.0, sigma, size=np.sum(mask))
+                    child = _repair_to_bounds(child, lower, upper)
+                    children.append(child)
+                    if len(children) >= island_size - elite_count:
+                        break
 
-        for i in range(num_pop):
-            distances = np.linalg.norm(population - population[i], axis=1)
-            neighbors = np.where((distances > 0.0) & (distances <= neighbor_radius))[0]
+            new_population[island] = np.vstack([elites, np.asarray(children[:island_size - elite_count])])
 
-            if neighbors.size == 0:
-                levy_step = _levy_flight(num_vars, levy_beta, rng) * np.maximum(np.abs(population[i]), 1.0)
-                new_delta_x[i] = levy_step
-                new_population[i] = population[i] + levy_step
-                continue
-
-            separation = -np.sum(population[i] - population[neighbors], axis=0)
-            alignment = np.mean(delta_x[neighbors], axis=0)
-            cohesion = np.mean(population[neighbors], axis=0) - population[i]
-            food_attraction = food_pos - population[i]
-            enemy_avoidance = population[i] - enemy_pos
-
-            force = np.zeros(num_vars, dtype=np.float64)
-            for j in kbest:
-                if j == i:
-                    continue
-                diff = population[j] - population[i]
-                dist = np.linalg.norm(diff) + 1e-12
-                force += rng.random() * k_t * mass[i] * mass[j] * diff / dist
-
-            enemy_diff = enemy_pos - population[i]
-            enemy_dist = np.linalg.norm(enemy_diff) + 1e-12
-            force -= rng.random() * k_t * mass[i] * mass[enemy_idx] * enemy_diff / enemy_dist
-            acceleration = force / (fit_g[i] + 1e-12)
-
-            step = (
-                inertia * delta_x[i]
-                + behavior * rng.random() * separation
-                + behavior * rng.random() * alignment
-                + behavior * rng.random() * cohesion
-                + 2.0 * rng.random() * food_attraction
-                + behavior * rng.random() * enemy_avoidance
-                + acceleration
-            )
-            step = np.clip(step, -max_step, max_step)
-            new_delta_x[i] = step
-            new_population[i] = population[i] + step
-
-        new_population = _repair_to_bounds(new_population, lower, upper)
         reference_values = objective_vectors if multi_objective else None
         new_objective_vectors, new_objective_scalars = _evaluate_population(
             population=new_population,
@@ -429,26 +440,59 @@ def dragonfly_optimize(
             reference_values=reference_values,
         )
         nfev += num_pop
-
         new_violations = np.array(
             [_constraint_violation(new_population[i], constraints, args) for i in range(num_pop)],
             dtype=np.float64,
         )
+
         penalty_factor *= penalty_growth
         new_energies = new_objective_scalars + penalty_factor * new_violations
 
-        improved = new_energies < energies
-        population[improved] = new_population[improved]
-        delta_x[improved] = new_delta_x[improved]
-        objective_vectors[improved] = new_objective_vectors[improved]
-        objective_scalars[improved] = new_objective_scalars[improved]
-        violations[improved] = new_violations[improved]
-        energies[improved] = new_energies[improved]
+        population = new_population
+        objective_vectors = new_objective_vectors
+        objective_scalars = new_objective_scalars
+        violations = new_violations
+        energies = new_energies
 
         if return_pareto and multi_objective:
             archive_x.extend([row.copy() for row in population])
             archive_f.extend([row.copy() for row in objective_vectors])
             archive_v.extend([float(value) for value in violations])
+
+        if num_islands > 1 and (iteration + 1) % migration_interval == 0:
+            migrants_x = []
+            migrants_f = []
+            migrants_s = []
+            migrants_v = []
+            migrants_e = []
+
+            for island in islands:
+                island_order = island[np.argsort(energies[island])]
+                count = min(migration_size, island.size)
+                selected = island_order[:count]
+                migrants_x.append(population[selected].copy())
+                migrants_f.append(objective_vectors[selected].copy())
+                migrants_s.append(objective_scalars[selected].copy())
+                migrants_v.append(violations[selected].copy())
+                migrants_e.append(energies[selected].copy())
+
+            for island_id, island in enumerate(islands):
+                source_id = (island_id - 1) % num_islands
+                incoming_x = migrants_x[source_id]
+                incoming_f = migrants_f[source_id]
+                incoming_s = migrants_s[source_id]
+                incoming_v = migrants_v[source_id]
+                incoming_e = migrants_e[source_id]
+
+                replace_count = min(incoming_x.shape[0], island.size)
+                island_order = island[np.argsort(energies[island])[::-1]]
+                replace_idx = island_order[:replace_count]
+
+                population[replace_idx] = incoming_x[:replace_count]
+                objective_vectors[replace_idx] = incoming_f[:replace_count]
+                objective_scalars[replace_idx] = incoming_s[:replace_count]
+                violations[replace_idx] = incoming_v[:replace_count]
+                energies[replace_idx] = incoming_e[:replace_count]
 
         curr_best_idx = int(np.argmin(energies))
         if energies[curr_best_idx] < best_energy:
@@ -472,8 +516,7 @@ def dragonfly_optimize(
                 if scalarization == "weighted_sum":
                     value = float(np.dot(local_weights, values))
                 else:
-                    reference = np.min(objective_vectors, axis=0)
-                    value = float(np.max(local_weights * np.abs(values - reference)))
+                    value = float(np.max(local_weights * np.abs(values - best_f)))
             return value + penalty_factor * _constraint_violation(x_local, constraints, args)
 
         polish_method = "L-BFGS-B" if not constraints else "SLSQP"
@@ -512,7 +555,7 @@ def dragonfly_optimize(
     result.objective_vector = best_f.copy()
     result.constraint_violation = float(_constraint_violation(best_x, constraints, args))
     result.penalized_fun = best_energy
-    result.optimizer = "CFSSDA"
+    result.optimizer = "MIGA"
 
     if multi_objective:
         result.fun_vector = best_f.copy()

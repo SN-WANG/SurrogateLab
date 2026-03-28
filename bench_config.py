@@ -1,4 +1,4 @@
-"""Configuration for the aero contract benchmark runner."""
+"""Configuration for the surrogate benchmark runner."""
 
 from __future__ import annotations
 
@@ -77,6 +77,19 @@ DEFAULT_OPTIMIZATION_CASES = OrderedDict(
     }
 )
 
+DEFAULT_MIGA_PARAMS = {
+    "popsize": 10,
+    "maxiter": 30,
+    "num_islands": 4,
+    "migration_interval": 10,
+    "migration_size": 2,
+}
+
+DEFAULT_DRAGONFLY_PARAMS = {
+    "popsize": 20,
+    "maxiter": 50,
+}
+
 
 def _expand_demo_selection(selection: Iterable[str]) -> List[str]:
     """Expand demo aliases such as ``all`` or ``ensemble`` into ``A-J`` labels."""
@@ -110,7 +123,7 @@ def _expand_case_selection(selection: List[str], defaults: Dict[str, dict]) -> L
 
 
 def get_args() -> argparse.Namespace:
-    """Parse command-line arguments for the aero contract benchmark runner.
+    """Parse command-line arguments for the benchmark runner.
 
     Returns:
         argparse.Namespace: Parsed configuration with expanded demo labels and
@@ -118,7 +131,7 @@ def get_args() -> argparse.Namespace:
     """
 
     parser = argparse.ArgumentParser(
-        description="Aero contract benchmark runner for the 10 WSNet algorithms."
+        description="Benchmark runner for the 10 SurrogateLab demos."
     )
 
     parser.add_argument(
@@ -219,34 +232,52 @@ def get_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--de_popsize",
+        "--miga_popsize",
         type=int,
-        default=10,
-        help="Population size for differential evolution.",
+        default=DEFAULT_MIGA_PARAMS["popsize"],
+        help="Population size multiplier for MIGA.",
     )
     parser.add_argument(
-        "--de_maxiter",
+        "--miga_maxiter",
         type=int,
-        default=30,
-        help="Maximum iterations for differential evolution.",
+        default=DEFAULT_MIGA_PARAMS["maxiter"],
+        help="Maximum iterations for MIGA.",
+    )
+    parser.add_argument(
+        "--miga_num_islands",
+        type=int,
+        default=DEFAULT_MIGA_PARAMS["num_islands"],
+        help="Number of islands used by MIGA.",
+    )
+    parser.add_argument(
+        "--miga_migration_interval",
+        type=int,
+        default=DEFAULT_MIGA_PARAMS["migration_interval"],
+        help="Migration interval for MIGA.",
+    )
+    parser.add_argument(
+        "--miga_migration_size",
+        type=int,
+        default=DEFAULT_MIGA_PARAMS["migration_size"],
+        help="Number of migrants exchanged by MIGA.",
     )
     parser.add_argument(
         "--df_popsize",
         type=int,
-        default=20,
-        help="Population size for the dragonfly optimizer.",
+        default=DEFAULT_DRAGONFLY_PARAMS["popsize"],
+        help="Population size multiplier for CFSSDA.",
     )
     parser.add_argument(
         "--df_maxiter",
         type=int,
-        default=50,
-        help="Maximum iterations for the dragonfly optimizer.",
+        default=DEFAULT_DRAGONFLY_PARAMS["maxiter"],
+        help="Maximum iterations for CFSSDA.",
     )
     parser.add_argument(
         "--opt_tol",
         type=float,
         default=1.0e-6,
-        help="Stopping tolerance for both optimizers.",
+        help="Stopping tolerance for the global optimizers.",
     )
 
     args = parser.parse_args()
@@ -265,5 +296,16 @@ def get_args() -> argparse.Namespace:
         "kernel": args.krg_kernel,
         "theta0": args.krg_theta0,
         "theta_bounds": tuple(args.krg_theta_bounds),
+    }
+    args.miga_params = {
+        "popsize": args.miga_popsize,
+        "maxiter": args.miga_maxiter,
+        "num_islands": args.miga_num_islands,
+        "migration_interval": args.miga_migration_interval,
+        "migration_size": args.miga_migration_size,
+    }
+    args.df_params = {
+        "popsize": args.df_popsize,
+        "maxiter": args.df_maxiter,
     }
     return args

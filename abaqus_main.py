@@ -1,13 +1,13 @@
-# Aero Optimization Solver Benchmark Platform
-# Author: Shengning Wang
+"""Abaqus-style benchmark platform for surrogate and optimization demos."""
 
-import os
+from __future__ import annotations
+
 import argparse
+import os
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import differential_evolution, NonlinearConstraint
-from scipy.optimize import OptimizeResult
+from scipy.optimize import NonlinearConstraint, OptimizeResult
 
 import abaqus_config
 
@@ -31,6 +31,7 @@ from sampling.mo_infill import MultiObjectiveInfill
 
 # Optimization Methods
 from models.optimization.dragonfly import dragonfly_optimize
+from models.optimization.miga import multi_island_genetic_optimize
 
 # Tools
 from sampling.doe import lhs_design
@@ -323,7 +324,6 @@ def plot_multifidelity(
 def plot_sequential(
     y_test: np.ndarray,
     preds: Dict[str, np.ndarray],
-    infill_dict: Dict[str, Dict[str, np.ndarray]],
     mo_pareto: Optional[np.ndarray],
     mo_infill_obj: Optional[np.ndarray],
     args: argparse.Namespace,
@@ -337,7 +337,6 @@ def plot_sequential(
     Args:
         y_test: Ground truth, shape (n, num_outputs).
         preds: Dict mapping method name to y_pred array (Demo F, G only).
-        infill_dict: Dict mapping method name to {"y": np.ndarray} of infill outputs.
         mo_pareto: Pareto front points from Demo H, shape (n_pf, 2), or None.
         mo_infill_obj: All infill objective values from Demo H, shape (n_infill, 2), or None.
         args: Parsed arguments.
@@ -402,7 +401,7 @@ def plot_single_opt(
 ) -> None:
     """Visualize single-objective optimization results.
 
-    Left: bar chart comparing predicted vs verified objective for DE and CFSSDA.
+    Left: bar chart comparing predicted vs verified objective values.
     Right: grouped bar chart of optimal design variables.
     Saved to {save_dir}/fig_single_opt.png.
 
@@ -466,7 +465,7 @@ def plot_multi_opt(
 ) -> None:
     """Visualize multi-objective optimization results.
 
-    Left: Pareto front scatter (CFSSDA) with DE optimum marked as star.
+    Left: Pareto front scatter with representative optima.
     Right: constraint bar chart showing weight values vs upper bound.
     Saved to {save_dir}/fig_multi_opt.png.
 
@@ -485,22 +484,35 @@ def plot_multi_opt(
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     obj_names = [args.output_names[i] for i in args.obj_indices[:2]]
 
-    # Left: Pareto front + DE optimum
-    has_pareto = False
-    for n in names:
-        pf = opt_results[n].get("pareto_f")
+    for ci, name in enumerate(names):
+        color = _COLORS[ci % len(_COLORS)]
+        marker = _MARKERS[ci % len(_MARKERS)]
+        pf = opt_results[name].get("pareto_f")
         if pf is not None and len(pf) > 0:
-            ax1.scatter(pf[:, 0], pf[:, 1], s=50, c="tab:blue",
-                        edgecolors="k", linewidths=0.5,
-                        label=f"{n} Pareto", zorder=3)
-            has_pareto = True
-        obj_v = opt_results[n].get("multi_verified_obj")
+            ax1.scatter(
+                pf[:, 0],
+                pf[:, 1],
+                s=45,
+                c=color,
+                edgecolors="k",
+                linewidths=0.5,
+                alpha=0.7,
+                label=f"{name} Pareto",
+                zorder=3,
+            )
+        obj_v = opt_results[name].get("multi_verified_obj")
         if obj_v is not None:
-            marker = "*" if not has_pareto else "^"
-            ax1.scatter(obj_v[0], obj_v[1], s=150, marker=marker,
-                        c=_COLORS[names.index(n) % len(_COLORS)],
-                        edgecolors="k", linewidths=1,
-                        label=f"{n} Optimum", zorder=4)
+            ax1.scatter(
+                obj_v[0],
+                obj_v[1],
+                s=150,
+                marker=marker,
+                c=color,
+                edgecolors="k",
+                linewidths=1,
+                label=f"{name} Optimum",
+                zorder=4,
+            )
     ax1.set_xlabel(obj_names[0])
     ax1.set_ylabel(obj_names[1])
     ax1.set_title("Pareto Front & Optima")
@@ -682,7 +694,6 @@ def sequential_pipeline(
     results = {}
     model_krg = None
     preds = {}
-    infill_dict = {}
     mo_pareto = None
     mo_infill_obj = None
 
@@ -819,7 +830,7 @@ def sequential_pipeline(
         results["KRG_MOInfill"] = evaluate_metrics(y_test, y_pred, "KRG + MOInfill")
 
     if args.visualize and preds:
-        plot_sequential(y_test, preds, infill_dict, mo_pareto, mo_infill_obj, args)
+        plot_sequential(y_test, preds, mo_pareto, mo_infill_obj, args)
 
     return results, model_krg
 
@@ -831,8 +842,8 @@ def optimization_pipeline(
 ) -> Dict[str, dict]:
     """Run optimizer demos on the KRG surrogate surface.
 
-    I: DE (Differential Evolution) — single and multi-objective
-    J: CFSSDA (Dragonfly) — single and multi-objective with Pareto front
+    I: MIGA — single and multi-objective with Pareto front
+    J: CFSSDA — single and multi-objective with Pareto front
 
     Args:
         args: Parsed arguments.
@@ -843,14 +854,16 @@ def optimization_pipeline(
     Returns:
         Dict mapping demo label to optimization results.
     """
-    results = {}
-    plot_data = {}
-
-    scipy_bounds = [(args.bounds[i, 0], args.bounds[i, 1])
-                    for i in range(args.num_features)]
-    weight_ub = float(np.percentile(
-        y_train[:, args.constraint_indices[0]], args.constraint_percentile
-    ))
+    results: Dict[str, dict] = {}
+    plot_data: Dict[str, dict] = {}
+    scipy_bounds = [tuple(bound) for bound in args.bounds[: args.num_features]]
+    high_fidelity_model = AbaqusModel(fidelity="high")
+    weight_ub = float(
+        np.percentile(
+            y_train[:, args.constraint_indices[0]],
+            args.constraint_percentile,
+        )
+    )
 
     def _single_obj(x_vec: np.ndarray) -> float:
         pred, _ = model_krg.predict(x_vec.reshape(1, -1))
@@ -860,93 +873,119 @@ def optimization_pipeline(
         pred, _ = model_krg.predict(x_vec.reshape(1, -1))
         return pred[0, args.obj_indices]
 
+    def _extract_pareto(result: OptimizeResult) -> Optional[np.ndarray]:
+        pareto_f = getattr(result, "pareto_f", None)
+        if pareto_f is None:
+            return None
+        pareto_arr = np.asarray(pareto_f, dtype=float)
+        return pareto_arr if pareto_arr.size > 0 else None
+
+    def _log_single_result(name: str, result: OptimizeResult) -> np.ndarray:
+        verified = high_fidelity_model.run(result.x)
+        logger.info(f"  [Single-obj] best x : {result.x}")
+        logger.info(
+            f"  Predicted mises     : {hue.c}{result.fun:.6f}{hue.q}  |  "
+            f"Verified: {hue.g}{verified[args.opt_single_idx]:.6f}{hue.q}"
+        )
+        logger.info(f"  Verified weight     : {verified[0]:.6f}  (ub={weight_ub:.4f})")
+        plot_data[name] = {
+            "single_pred": float(result.fun),
+            "single_verified": float(verified[args.opt_single_idx]),
+            "single_x": result.x,
+        }
+        return verified
+
+    def _log_multi_result(
+        name: str,
+        result: OptimizeResult,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        verified = high_fidelity_model.run(result.x)
+        predicted = _multi_obj(result.x)
+        logger.info(f"  [Multi-obj]  best x : {result.x}")
+        logger.info(f"  Predicted [sk, ss]  : {predicted}")
+        logger.info(f"  Verified  [sk, ss]  : {hue.g}{verified[args.obj_indices]}{hue.q}")
+        pareto_f = _extract_pareto(result)
+        if pareto_f is not None:
+            logger.info(f"  Pareto front ({len(pareto_f)} pts):")
+            for point in pareto_f:
+                logger.info(
+                    f"    stress_skin={point[0]:.4f}, stress_stiff={point[1]:.4f}"
+                )
+        plot_data.setdefault(name, {}).update(
+            {
+                "multi_verified_obj": verified[args.obj_indices],
+                "multi_verified_weight": float(verified[0]),
+                "pareto_f": pareto_f,
+            }
+        )
+        return verified, pareto_f
+
     weight_con = NonlinearConstraint(
         fun=lambda x: float(model_krg.predict(x.reshape(1, -1))[0][0, 0]),
-        lb=-np.inf, ub=weight_ub,
+        lb=-np.inf,
+        ub=weight_ub,
     )
 
-    # Demo I: DE (Differential Evolution)
     if "I" in args.demos:
-        logger.info(f"{hue.b}>>> Demo I: DE{hue.q}")
-
-        # Single-objective
-        ri_s: OptimizeResult = differential_evolution(
-            func=_single_obj, bounds=scipy_bounds, constraints=weight_con,
-            strategy="best1bin", maxiter=args.de_maxiter, popsize=args.de_popsize,
-            tol=args.opt_tol, seed=args.seed,
+        logger.info(f"{hue.b}>>> Demo I: MIGA{hue.q}")
+        result_single = multi_island_genetic_optimize(
+            func=_single_obj,
+            bounds=scipy_bounds,
+            constraints=weight_con,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=False,
+            **args.miga_params,
         )
-        true_i_s = AbaqusModel(fidelity="high").run(ri_s.x)
-        logger.info(f"  [Single-obj] best x : {ri_s.x}")
-        logger.info(f"  Predicted mises     : {hue.c}{ri_s.fun:.6f}{hue.q}  |  "
-                     f"Verified: {hue.g}{true_i_s[args.opt_single_idx]:.6f}{hue.q}")
-        logger.info(f"  Verified weight     : {true_i_s[0]:.6f}  (ub={weight_ub:.4f})")
+        _log_single_result("MIGA", result_single)
 
-        # Multi-objective (scalarized)
-        ri_m: OptimizeResult = differential_evolution(
-            func=lambda x: float(np.sum(_multi_obj(x))),
-            bounds=scipy_bounds, constraints=weight_con,
-            strategy="best1bin", maxiter=args.de_maxiter, popsize=args.de_popsize,
-            tol=args.opt_tol, seed=args.seed,
+        result_multi = multi_island_genetic_optimize(
+            func=_multi_obj,
+            bounds=scipy_bounds,
+            constraints=weight_con,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=True,
+            scalarization="weighted_sum",
+            return_pareto=True,
+            **args.miga_params,
         )
-        true_i_m = AbaqusModel(fidelity="high").run(ri_m.x)
-        logger.info(f"  [Multi-obj]  best x : {ri_m.x}")
-        logger.info(f"  Predicted [sk, ss]  : {_multi_obj(ri_m.x)}")
-        logger.info(f"  Verified  [sk, ss]  : {hue.g}{true_i_m[args.obj_indices]}{hue.q}")
-
-        results["DE"] = {"single_x": ri_s.x, "single_fun": ri_s.fun,
-                         "multi_x": ri_m.x}
-        plot_data["DE"] = {
-            "single_pred": ri_s.fun,
-            "single_verified": float(true_i_s[args.opt_single_idx]),
-            "single_x": ri_s.x,
-            "multi_verified_obj": true_i_m[args.obj_indices],
-            "multi_verified_weight": float(true_i_m[0]),
+        _log_multi_result("MIGA", result_multi)
+        results["MIGA"] = {
+            "single_x": result_single.x,
+            "single_fun": float(result_single.fun),
+            "multi_x": result_multi.x,
         }
 
-    # Demo J: CFSSDA (Dragonfly)
     if "J" in args.demos:
         logger.info(f"{hue.b}>>> Demo J: CFSSDA{hue.q}")
-
-        # Single-objective
-        rj_s = dragonfly_optimize(
-            func=_single_obj, bounds=scipy_bounds, constraints=weight_con,
-            maxiter=args.df_maxiter, popsize=args.df_popsize,
-            tol=args.opt_tol, seed=args.seed, multi_objective=False,
+        result_single = dragonfly_optimize(
+            func=_single_obj,
+            bounds=scipy_bounds,
+            constraints=weight_con,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=False,
+            **args.df_params,
         )
-        true_j_s = AbaqusModel(fidelity="high").run(rj_s.x)
-        logger.info(f"  [Single-obj] best x : {rj_s.x}")
-        logger.info(f"  Predicted mises     : {hue.c}{rj_s.fun:.6f}{hue.q}  |  "
-                     f"Verified: {hue.g}{true_j_s[args.opt_single_idx]:.6f}{hue.q}")
-        logger.info(f"  Verified weight     : {true_j_s[0]:.6f}  (ub={weight_ub:.4f})")
+        _log_single_result("CFSSDA", result_single)
 
-        # Multi-objective with Pareto front
-        rj_m = dragonfly_optimize(
-            func=_multi_obj, bounds=scipy_bounds, constraints=weight_con,
-            maxiter=args.df_maxiter, popsize=args.df_popsize,
-            tol=args.opt_tol, seed=args.seed,
-            multi_objective=True, scalarization="weighted_sum", return_pareto=True,
+        result_multi = dragonfly_optimize(
+            func=_multi_obj,
+            bounds=scipy_bounds,
+            constraints=weight_con,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=True,
+            scalarization="weighted_sum",
+            return_pareto=True,
+            **args.df_params,
         )
-        true_j_m = AbaqusModel(fidelity="high").run(rj_m.x)
-        logger.info(f"  [Multi-obj]  best x : {rj_m.x}")
-        logger.info(f"  Predicted [sk, ss]  : {_multi_obj(rj_m.x)}")
-        logger.info(f"  Verified  [sk, ss]  : {hue.g}{true_j_m[args.obj_indices]}{hue.q}")
-
-        pareto_f = None
-        if hasattr(rj_m, "pareto_f") and rj_m.pareto_f is not None:
-            pareto_f = np.array(rj_m.pareto_f)
-            logger.info(f"  Pareto front ({len(pareto_f)} pts):")
-            for pt in pareto_f:
-                logger.info(f"    stress_skin={pt[0]:.4f}, stress_stiff={pt[1]:.4f}")
-
-        results["CFSSDA"] = {"single_x": rj_s.x, "single_fun": rj_s.fun,
-                             "multi_x": rj_m.x}
-        plot_data["CFSSDA"] = {
-            "single_pred": rj_s.fun,
-            "single_verified": float(true_j_s[args.opt_single_idx]),
-            "single_x": rj_s.x,
-            "multi_verified_obj": true_j_m[args.obj_indices],
-            "multi_verified_weight": float(true_j_m[0]),
-            "pareto_f": pareto_f,
+        _log_multi_result("CFSSDA", result_multi)
+        results["CFSSDA"] = {
+            "single_x": result_single.x,
+            "single_fun": float(result_single.fun),
+            "multi_x": result_multi.x,
         }
 
     if args.visualize and plot_data:

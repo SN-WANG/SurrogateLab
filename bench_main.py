@@ -1,4 +1,4 @@
-"""Main runner for the aero contract benchmark suite."""
+"""Main runner for the surrogate benchmark suite."""
 
 from __future__ import annotations
 
@@ -8,10 +8,9 @@ import random
 from typing import Any, Dict, List
 
 import numpy as np
-from scipy.optimize import differential_evolution
 
-import bench_config as benchmark_config
-import bench_funcs as benchmark_functions
+import bench_config
+import bench_funcs
 
 from models.classical.prs import PRS
 from models.classical.rbf import RBF
@@ -23,6 +22,7 @@ from models.multi_fidelity.mfs_mls import MFSMLS
 from models.multi_fidelity.mmfs import MMFS
 from models.multi_fidelity.cca_mfs import CCAMFS
 from models.optimization.dragonfly import dragonfly_optimize
+from models.optimization.miga import multi_island_genetic_optimize
 from sampling.doe import lhs_design
 from sampling.so_infill import SingleObjectiveInfill
 from sampling.mf_infill import MultiFidelityInfill
@@ -382,8 +382,8 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
 
     for case_name in args.ensemble_cases:
         reset_random_state(args.seed)
-        spec = benchmark_functions.get_scalar_benchmark(case_name)
-        config = benchmark_config.DEFAULT_ENSEMBLE_CASES[case_name]
+        spec = bench_funcs.get_scalar_benchmark(case_name)
+        config = bench_config.DEFAULT_ENSEMBLE_CASES[case_name]
         bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
         x_train = sample_lhs(bounds, config["num_train"], lhs_iterations)
@@ -474,8 +474,8 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
 
     for case_name in args.multifidelity_cases:
         reset_random_state(args.seed)
-        spec = benchmark_functions.get_multifidelity_benchmark(case_name)
-        config = benchmark_config.DEFAULT_MULTIFIDELITY_CASES[case_name]
+        spec = bench_funcs.get_multifidelity_benchmark(case_name)
+        config = bench_config.DEFAULT_MULTIFIDELITY_CASES[case_name]
         bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
         x_lf = sample_lhs(bounds, config["num_lf"], lhs_iterations)
@@ -536,9 +536,9 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
         Dominated by repeated Kriging fits across the infill iterations.
     """
 
-    config = benchmark_config.DEFAULT_SINGLE_OBJECTIVE_ACTIVE_CASE
+    config = bench_config.DEFAULT_SINGLE_OBJECTIVE_ACTIVE_CASE
     reset_random_state(args.seed)
-    spec = benchmark_functions.get_scalar_benchmark(config["name"])
+    spec = bench_funcs.get_scalar_benchmark(config["name"])
     bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
     x_current = sample_lhs(bounds, config["num_initial"], lhs_iterations)
@@ -615,9 +615,9 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
         Dominated by repeated Kriging fits plus MICO covariance scoring.
     """
 
-    config = benchmark_config.DEFAULT_MULTI_FIDELITY_ACTIVE_CASE
+    config = bench_config.DEFAULT_MULTI_FIDELITY_ACTIVE_CASE
     reset_random_state(args.seed)
-    spec = benchmark_functions.get_multifidelity_benchmark(config["name"])
+    spec = bench_funcs.get_multifidelity_benchmark(config["name"])
     bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
     x_lf = sample_lhs(bounds, config["num_lf"], lhs_iterations)
@@ -699,9 +699,9 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
         Dominated by repeated Kriging fits and EHVI sampling.
     """
 
-    config = benchmark_config.DEFAULT_MULTI_OBJECTIVE_ACTIVE_CASE
+    config = bench_config.DEFAULT_MULTI_OBJECTIVE_ACTIVE_CASE
     reset_random_state(args.seed)
-    spec = benchmark_functions.get_multiobjective_benchmark(config["name"])
+    spec = bench_funcs.get_multiobjective_benchmark(config["name"])
     bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
     x_current = sample_lhs(bounds, config["num_initial"], lhs_iterations)
@@ -765,7 +765,7 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
 
 
 def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
-    """Run the unconstrained single-objective optimization cases for demos ``I`` and ``J``.
+    """Run the single-objective optimization cases for demos ``I`` and ``J``.
 
     Args:
         args: Parsed command-line arguments.
@@ -788,8 +788,8 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
 
     for case_name in args.optimization_cases:
         reset_random_state(args.seed)
-        spec = benchmark_functions.get_scalar_benchmark(case_name)
-        config = benchmark_config.DEFAULT_OPTIMIZATION_CASES[case_name]
+        spec = bench_funcs.get_scalar_benchmark(case_name)
+        config = bench_config.DEFAULT_OPTIMIZATION_CASES[case_name]
         bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
         x_train = sample_lhs(bounds, config["num_train"], lhs_iterations)
@@ -808,37 +808,36 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
         }
 
         if "I" in args.demos:
-            result_de = differential_evolution(
-                objective,
+            result_miga = multi_island_genetic_optimize(
+                func=objective,
                 bounds=[tuple(bound) for bound in bounds],
-                maxiter=args.de_maxiter,
-                popsize=args.de_popsize,
                 tol=args.opt_tol,
                 seed=args.seed,
+                multi_objective=False,
+                **args.miga_params,
             )
-            verified_de = float(spec.evaluate(result_de.x.reshape(1, -1))[0, 0])
+            verified_miga = float(spec.evaluate(result_miga.x.reshape(1, -1))[0, 0])
             optimum_gap = None
             if spec.known_optimum is not None:
-                optimum_gap = abs(verified_de - spec.known_optimum)
-            case_result["algorithms"]["DE"] = {
-                "x_best": result_de.x,
-                "predicted_value": float(result_de.fun),
-                "verified_value": verified_de,
+                optimum_gap = abs(verified_miga - spec.known_optimum)
+            case_result["algorithms"]["MIGA"] = {
+                "x_best": result_miga.x,
+                "predicted_value": float(result_miga.fun),
+                "verified_value": verified_miga,
                 "optimum_gap": optimum_gap,
             }
             logger.info(
-                f"  {spec.name} / DE: predicted={result_de.fun:.4f}, verified={verified_de:.4f}"
+                f"  {spec.name} / MIGA: predicted={result_miga.fun:.4f}, verified={verified_miga:.4f}"
             )
 
         if "J" in args.demos:
             result_df = dragonfly_optimize(
-                objective,
+                func=objective,
                 bounds=[tuple(bound) for bound in bounds],
-                maxiter=args.df_maxiter,
-                popsize=args.df_popsize,
                 tol=args.opt_tol,
                 seed=args.seed,
                 multi_objective=False,
+                **args.df_params,
             )
             verified_df = float(spec.evaluate(result_df.x.reshape(1, -1))[0, 0])
             optimum_gap = None
@@ -891,10 +890,10 @@ def save_results(args: Any, payload: Dict[str, Any]) -> str:
 def main() -> None:
     """Execute the full aero benchmark workflow."""
 
-    args = benchmark_config.get_args()
+    args = bench_config.get_args()
     seed_everything(args.seed)
 
-    logger.info(f"{hue.b}Aero Contract Benchmark Suite{hue.q}")
+    logger.info(f"{hue.b}Surrogate Benchmark Suite{hue.q}")
     logger.info(f"  Demos    : {args.demos}")
     logger.info(f"  Save dir : {args.save_dir}")
 
