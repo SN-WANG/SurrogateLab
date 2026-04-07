@@ -6,12 +6,18 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 from typing import Any, Dict, List
 
 import numpy as np
 from scipy.optimize import NonlinearConstraint
 
 import abaqus_config
+
+try:
+    from wing_structure_simulation import AbaqusModel as _ExternalAbaqusModel
+except ImportError:
+    _ExternalAbaqusModel = None
 
 from models.classical.krg import KRG
 from models.classical.prs import PRS
@@ -30,16 +36,16 @@ from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
 
 
-class AbaqusModel:
-    """
-    Mock Abaqus FEM solver for local engineering validation.
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ABAQUS_RUNTIME: Dict[str, Any] | None = None
 
-    This class keeps the same lightweight call contract as the real server-side
-    Abaqus model: instantiate the model and call ``run(input_arr)`` with a
-    single design vector.
+
+class _LocalProxyAbaqusModel:
+    """
+    Local analytic proxy for engineering validation without Abaqus.
 
     Args:
-        fidelity (str): Simulation fidelity, ``"high"`` or ``"low"``.
+        fidelity (str): Simulation fidelity, "high" or "low".
     """
 
     def __init__(self, fidelity: str = "high") -> None:
@@ -80,6 +86,128 @@ class AbaqusModel:
             y = 0.85 * y + bias + np.random.normal(0.0, noise, size=y.shape)
 
         return y
+
+
+class _ExternalAbaqusModelAdapter:
+    """
+    Workspace-aware wrapper around the external Abaqus solver interface.
+
+    Args:
+        fidelity (str): Simulation fidelity, "high" or "low".
+    """
+
+    def __init__(self, fidelity: str = "high") -> None:
+        self.model = _ExternalAbaqusModel(fidelity=fidelity)
+        self.input_vars = list(self.model.input_vars)
+        self.output_vars = list(self.model.output_vars)
+
+    def run(self, input_arr: np.ndarray) -> np.ndarray:
+        """
+        Execute one Abaqus simulation from the SurrogateLab root.
+
+        Args:
+            input_arr (np.ndarray): Design vector. (D,).
+
+        Returns:
+            np.ndarray: Structural responses. (4,).
+        """
+        current_dir = os.getcwd()
+        os.chdir(PROJECT_DIR)
+        try:
+            return self.model.run(input_arr)
+        finally:
+            os.chdir(current_dir)
+
+def _get_external_abaqus_command() -> str | None:
+    """
+    Return the Abaqus command configured by the external solver wrapper.
+
+    Returns:
+        str | None: Command name or None when the interface file is missing.
+    """
+    if _ExternalAbaqusModel is None:
+        return None
+    return _ExternalAbaqusModel().abaqus_cmd.split()[0]
+
+
+def get_abaqus_runtime() -> Dict[str, Any]:
+    """
+    Detect the available Abaqus runtime backend.
+
+    Returns:
+        Dict[str, Any]: Runtime status for solver selection and logging.
+    """
+    global _ABAQUS_RUNTIME
+    if _ABAQUS_RUNTIME is not None:
+        return _ABAQUS_RUNTIME
+
+    command_name = _get_external_abaqus_command()
+    interface_available = _ExternalAbaqusModel is not None
+    command_available = command_name is not None and shutil.which(command_name) is not None
+    available = interface_available and command_available
+    backend = "EXTERNAL_SOLVER" if available else "LOCAL_PROXY"
+
+    _ABAQUS_RUNTIME = {
+        "interface_available": interface_available,
+        "command_name": command_name,
+        "command_available": command_available,
+        "available": available,
+        "backend": backend,
+        "cache_tag": backend.lower(),
+    }
+    return _ABAQUS_RUNTIME
+
+
+def log_abaqus_runtime(runtime: Dict[str, Any]) -> None:
+    """
+    Print a high-visibility Abaqus runtime banner.
+
+    Args:
+        runtime (Dict[str, Any]): Runtime status returned by get_abaqus_runtime.
+    """
+    line = "=" * 78
+    availability_color = hue.g if runtime["available"] else hue.r
+    command_name = runtime["command_name"] if runtime["command_name"] is not None else "N/A"
+    logger.info(line)
+    logger.info(f"{hue.b}SIMULATION INTERFACE  : {hue.c}{str(runtime['interface_available']).upper()}{hue.q}")
+    logger.info(f"{hue.b}ABAQUS COMMAND        : {hue.m}{command_name}{hue.q}")
+    logger.info(f"{hue.b}ABAQUS COMMAND FOUND  : {hue.c}{str(runtime['command_available']).upper()}{hue.q}")
+    logger.info(f"{hue.b}ABAQUS AVAILABILITY   : {availability_color}{str(runtime['available']).upper()}{hue.q}")
+    logger.info(f"{hue.b}SOLVER BACKEND        : {hue.m}{runtime['backend']}{hue.q}")
+    logger.info(line)
+
+
+class AbaqusModel:
+    """
+    Runtime-selecting engineering solver wrapper.
+
+    This class keeps a stable call contract for the engineering workflow while
+    selecting the external Abaqus solver when it is available, otherwise
+    falling back to the local analytic proxy.
+
+    Args:
+        fidelity (str): Simulation fidelity, "high" or "low".
+    """
+
+    def __init__(self, fidelity: str = "high") -> None:
+        runtime = get_abaqus_runtime()
+        model_cls = _ExternalAbaqusModelAdapter if runtime["available"] else _LocalProxyAbaqusModel
+        self.backend = runtime["backend"]
+        self.model = model_cls(fidelity=fidelity)
+        self.input_vars = list(self.model.input_vars)
+        self.output_vars = list(self.model.output_vars)
+
+    def run(self, input_arr: np.ndarray) -> np.ndarray:
+        """
+        Execute one engineering simulation.
+
+        Args:
+            input_arr (np.ndarray): Design vector. (D,).
+
+        Returns:
+            np.ndarray: Structural responses. (4,).
+        """
+        return self.model.run(input_arr)
 
 
 def scale_to_bounds(x_norm: np.ndarray, bounds: np.ndarray) -> np.ndarray:
@@ -302,7 +430,8 @@ def generate_and_cache_doe(args: Any) -> Dict[str, np.ndarray]:
     Returns:
         Dict[str, np.ndarray]: Cached engineering data.
     """
-    cache_path = os.path.join(args.save_dir, "abaqus_doe_cache.npy")
+    runtime = get_abaqus_runtime()
+    cache_path = os.path.join(args.save_dir, f"abaqus_doe_cache_{runtime['cache_tag']}.npy")
     if os.path.isfile(cache_path):
         logger.info(f"{hue.g}Load cached engineering DOE from {cache_path}{hue.q}")
         return np.load(cache_path, allow_pickle=True).item()
@@ -780,8 +909,10 @@ def main() -> None:
     args = abaqus_config.get_args()
     seed_everything(args.seed)
     reset_random_state(args.seed)
+    runtime = get_abaqus_runtime()
 
     logger.info(f"{hue.b}SurrogateLab Abaqus Engineering Workflow{hue.q}")
+    log_abaqus_runtime(runtime)
     logger.info(f"  demos    : {args.demos}")
     logger.info(f"  targets  : {args.targets}")
     logger.info(f"  save_dir : {args.save_dir}")
@@ -791,6 +922,7 @@ def main() -> None:
         "seed": args.seed,
         "demos": args.demos,
         "targets": args.targets,
+        "runtime": runtime,
         "thresholds": {
             "ensemble_min_relative_gain": args.ensemble_min_relative_gain,
             "mf_min_accuracy": args.mf_min_accuracy,
