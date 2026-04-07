@@ -1,4 +1,5 @@
-"""Benchmark function registry for the aero contract test suite."""
+# Benchmark function registry for SurrogateLab
+# Author: Shengning Wang
 
 from __future__ import annotations
 
@@ -12,44 +13,39 @@ ArrayFn = Callable[[np.ndarray], np.ndarray]
 
 
 def _as_2d_array(x: np.ndarray, expected_dim: int, name: str) -> np.ndarray:
-    """Validate and reshape user input into a 2-D NumPy array."""
+    """
+    Convert user input to a 2-D float64 array.
+
+    Args:
+        x (np.ndarray): Input array. (N, D) or (D,).
+        expected_dim (int): Expected feature dimension.
+        name (str): Function name for error messages.
+
+    Returns:
+        np.ndarray: Reshaped array. (N, D).
+    """
     arr = np.asarray(x, dtype=np.float64)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
-    if arr.ndim != 2:
-        raise ValueError(f"{name} expects a 2-D array, got shape {arr.shape}.")
-    if arr.shape[1] != expected_dim:
-        raise ValueError(
-            f"{name} expects input_dim={expected_dim}, got {arr.shape[1]}."
-        )
+    if arr.ndim != 2 or arr.shape[1] != expected_dim:
+        raise ValueError(f"{name} expects shape (N, {expected_dim}) or ({expected_dim},), got {arr.shape}.")
     return arr
 
 
 @dataclass(frozen=True)
 class ScalarBenchmark:
-    """Container for a scalar-output benchmark function.
+    """
+    Scalar-output benchmark specification.
 
     Args:
-        name: Canonical benchmark name.
-        input_dim: Number of design variables.
-        bounds: Input bounds with shape (input_dim, 2).
-        output_name: Name of the scalar response.
-        description: Short human-readable description.
-        evaluator: Vectorized callable that maps ``(N, D)`` to ``(N, 1)``.
-        known_optimum: Optional known global minimum value.
-        known_minimizers: Optional tuple of known global minimizers.
-
-    Returns:
-        ScalarBenchmark: Immutable benchmark specification.
-
-    Raises:
-        ValueError: Propagated by the stored evaluator when the input is invalid.
-
-    Shapes:
-        ``(N, D) -> (N, 1)``
-
-    Complexity:
-        Construction is ``O(1)`` time and ``O(1)`` space.
+        name (str): Benchmark name.
+        input_dim (int): Input dimension.
+        bounds (Tuple[Tuple[float, float], ...]): Box bounds. (D, 2).
+        output_name (str): Output name.
+        description (str): Short description.
+        evaluator (ArrayFn): Benchmark function. (N, D) -> (N, 1).
+        known_optimum (Optional[float]): Known minimum value.
+        known_minimizers (Tuple[Tuple[float, ...], ...]): Known minimizers.
     """
 
     name: str
@@ -62,56 +58,41 @@ class ScalarBenchmark:
     known_minimizers: Tuple[Tuple[float, ...], ...] = field(default_factory=tuple)
 
     def evaluate(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the scalar benchmark.
+        """
+        Evaluate the scalar benchmark.
 
         Args:
-            x: Query points with shape ``(num_samples, input_dim)`` or ``(input_dim,)``.
+            x (np.ndarray): Query points. (N, D) or (D,).
 
         Returns:
-            np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-        Raises:
-            ValueError: If the input array does not match ``input_dim``.
-
-        Shapes:
-            ``(N, D) -> (N, 1)``
-
-        Complexity:
-            Time is benchmark-dependent; memory is ``O(N)``.
+            np.ndarray: Responses. (N, 1).
         """
-
         return self.evaluator(x)
 
     @property
     def bounds_array(self) -> np.ndarray:
-        """Return the bounds as a float64 array."""
+        """
+        Return bounds as a float64 array.
+
+        Returns:
+            np.ndarray: Box bounds. (D, 2).
+        """
         return np.asarray(self.bounds, dtype=np.float64)
 
 
 @dataclass(frozen=True)
 class MultiFidelityBenchmark:
-    """Container for a paired low-/high-fidelity benchmark.
+    """
+    Multi-fidelity benchmark specification.
 
     Args:
-        name: Canonical benchmark name.
-        input_dim: Number of design variables.
-        bounds: Input bounds with shape (input_dim, 2).
-        output_name: Name of the scalar response.
-        description: Short human-readable description.
-        high_fidelity: High-fidelity evaluator with shape ``(N, D) -> (N, 1)``.
-        low_fidelity: Low-fidelity evaluator with shape ``(N, D) -> (N, 1)``.
-
-    Returns:
-        MultiFidelityBenchmark: Immutable paired-function specification.
-
-    Raises:
-        ValueError: Propagated by the stored evaluators when the input is invalid.
-
-    Shapes:
-        ``(N, D) -> (N, 1)``
-
-    Complexity:
-        Construction is ``O(1)`` time and ``O(1)`` space.
+        name (str): Benchmark name.
+        input_dim (int): Input dimension.
+        bounds (Tuple[Tuple[float, float], ...]): Box bounds. (D, 2).
+        output_name (str): Output name.
+        description (str): Short description.
+        high_fidelity (ArrayFn): HF function. (N, D) -> (N, 1).
+        low_fidelity (ArrayFn): LF function. (N, D) -> (N, 1).
     """
 
     name: str
@@ -123,76 +104,52 @@ class MultiFidelityBenchmark:
     low_fidelity: ArrayFn
 
     def evaluate_high_fidelity(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the high-fidelity response.
+        """
+        Evaluate the high-fidelity response.
 
         Args:
-            x: Query points with shape ``(num_samples, input_dim)`` or ``(input_dim,)``.
+            x (np.ndarray): Query points. (N, D) or (D,).
 
         Returns:
-            np.ndarray: High-fidelity responses with shape ``(num_samples, 1)``.
-
-        Raises:
-            ValueError: If the input array does not match ``input_dim``.
-
-        Shapes:
-            ``(N, D) -> (N, 1)``
-
-        Complexity:
-            Time is benchmark-dependent; memory is ``O(N)``.
+            np.ndarray: HF responses. (N, 1).
         """
-
         return self.high_fidelity(x)
 
     def evaluate_low_fidelity(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the low-fidelity response.
+        """
+        Evaluate the low-fidelity response.
 
         Args:
-            x: Query points with shape ``(num_samples, input_dim)`` or ``(input_dim,)``.
+            x (np.ndarray): Query points. (N, D) or (D,).
 
         Returns:
-            np.ndarray: Low-fidelity responses with shape ``(num_samples, 1)``.
-
-        Raises:
-            ValueError: If the input array does not match ``input_dim``.
-
-        Shapes:
-            ``(N, D) -> (N, 1)``
-
-        Complexity:
-            Time is benchmark-dependent; memory is ``O(N)``.
+            np.ndarray: LF responses. (N, 1).
         """
-
         return self.low_fidelity(x)
 
     @property
     def bounds_array(self) -> np.ndarray:
-        """Return the bounds as a float64 array."""
+        """
+        Return bounds as a float64 array.
+
+        Returns:
+            np.ndarray: Box bounds. (D, 2).
+        """
         return np.asarray(self.bounds, dtype=np.float64)
 
 
 @dataclass(frozen=True)
 class MultiObjectiveBenchmark:
-    """Container for a multi-objective benchmark.
+    """
+    Multi-objective benchmark specification.
 
     Args:
-        name: Canonical benchmark name.
-        input_dim: Number of design variables.
-        bounds: Input bounds with shape (input_dim, 2).
-        output_names: Names of the objectives.
-        description: Short human-readable description.
-        evaluator: Vectorized callable that maps ``(N, D)`` to ``(N, M)``.
-
-    Returns:
-        MultiObjectiveBenchmark: Immutable multi-objective specification.
-
-    Raises:
-        ValueError: Propagated by the stored evaluator when the input is invalid.
-
-    Shapes:
-        ``(N, D) -> (N, M)``
-
-    Complexity:
-        Construction is ``O(1)`` time and ``O(1)`` space.
+        name (str): Benchmark name.
+        input_dim (int): Input dimension.
+        bounds (Tuple[Tuple[float, float], ...]): Box bounds. (D, 2).
+        output_names (Tuple[str, ...]): Objective names.
+        description (str): Short description.
+        evaluator (ArrayFn): Objective function. (N, D) -> (N, M).
     """
 
     name: str
@@ -203,103 +160,71 @@ class MultiObjectiveBenchmark:
     evaluator: ArrayFn
 
     def evaluate(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the multi-objective benchmark.
+        """
+        Evaluate the multi-objective benchmark.
 
         Args:
-            x: Query points with shape ``(num_samples, input_dim)`` or ``(input_dim,)``.
+            x (np.ndarray): Query points. (N, D) or (D,).
 
         Returns:
-            np.ndarray: Objective values with shape ``(num_samples, num_objectives)``.
-
-        Raises:
-            ValueError: If the input array does not match ``input_dim``.
-
-        Shapes:
-            ``(N, D) -> (N, M)``
-
-        Complexity:
-            Time is benchmark-dependent; memory is ``O(N * M)``.
+            np.ndarray: Objective values. (N, M).
         """
-
         return self.evaluator(x)
 
     @property
     def bounds_array(self) -> np.ndarray:
-        """Return the bounds as a float64 array."""
+        """
+        Return bounds as a float64 array.
+
+        Returns:
+            np.ndarray: Box bounds. (D, 2).
+        """
         return np.asarray(self.bounds, dtype=np.float64)
 
 
 def forrester(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Forrester function.
+    """
+    Evaluate the Forrester benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 1)`` or ``(1,)`` on ``[0, 1]``.
+        x (np.ndarray): Query points. (N, 1) or (1,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly one feature.
-
-    Shapes:
-        ``(N, 1) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=1, name="forrester")
+    x_arr = _as_2d_array(x, 1, "forrester")
     z = x_arr[:, 0]
     y = (6.0 * z - 2.0) ** 2 * np.sin(12.0 * z - 4.0)
     return y.reshape(-1, 1)
 
 
 def gramacy_lee(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Gramacy-Lee function.
+    """
+    Evaluate the Gramacy-Lee benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 1)`` or ``(1,)`` on ``[0.5, 2.5]``.
+        x (np.ndarray): Query points. (N, 1) or (1,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly one feature.
-
-    Shapes:
-        ``(N, 1) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=1, name="gramacy_lee")
+    x_arr = _as_2d_array(x, 1, "gramacy_lee")
     z = np.clip(x_arr[:, 0], 0.5, 2.5)
     y = np.sin(10.0 * np.pi * z) / (2.0 * z) + (z - 1.0) ** 4
     return y.reshape(-1, 1)
 
 
 def branin(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Branin-Hoo function.
+    """
+    Evaluate the Branin-Hoo benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on
-            ``[-5, 10] x [0, 15]``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="branin")
+    x_arr = _as_2d_array(x, 2, "branin")
     x1 = x_arr[:, 0]
     x2 = x_arr[:, 1]
     a = 1.0
@@ -313,98 +238,58 @@ def branin(x: np.ndarray) -> np.ndarray:
 
 
 def branin_low_fidelity(x: np.ndarray) -> np.ndarray:
-    """Evaluate the low-fidelity Branin variant used for multi-fidelity tests.
+    """
+    Evaluate the low-fidelity Branin variant.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on
-            ``[-5, 10] x [0, 15]``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Scalar low-fidelity responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="branin_low_fidelity")
+    x_arr = _as_2d_array(x, 2, "branin_low_fidelity")
     hf = branin(x_arr)[:, 0]
     y = 0.9 * hf + 0.4 * np.sin(x_arr[:, 0]) - 0.2 * x_arr[:, 1] + 2.0
     return y.reshape(-1, 1)
 
 
 def hartman3(x: np.ndarray) -> np.ndarray:
-    """Evaluate the three-dimensional Hartman function.
+    """
+    Evaluate the three-dimensional Hartman benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 3)`` or ``(3,)`` on ``[0, 1]^3``.
+        x (np.ndarray): Query points. (N, 3) or (3,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly three features.
-
-    Shapes:
-        ``(N, 3) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=3, name="hartman3")
+    x_arr = _as_2d_array(x, 3, "hartman3")
     alpha = np.array([1.0, 1.2, 3.0, 3.2], dtype=np.float64)
     a_mat = np.array(
-        [
-            [3.0, 10.0, 30.0],
-            [0.1, 10.0, 35.0],
-            [3.0, 10.0, 30.0],
-            [0.1, 10.0, 35.0],
-        ],
+        [[3.0, 10.0, 30.0], [0.1, 10.0, 35.0], [3.0, 10.0, 30.0], [0.1, 10.0, 35.0]],
         dtype=np.float64,
     )
     p_mat = 1.0e-4 * np.array(
-        [
-            [3689.0, 1170.0, 2673.0],
-            [4699.0, 4387.0, 7470.0],
-            [1091.0, 8732.0, 5547.0],
-            [381.0, 5743.0, 8828.0],
-        ],
+        [[3689.0, 1170.0, 2673.0], [4699.0, 4387.0, 7470.0], [1091.0, 8732.0, 5547.0], [381.0, 5743.0, 8828.0]],
         dtype=np.float64,
     )
     total = np.zeros(x_arr.shape[0], dtype=np.float64)
     for idx in range(4):
-        total += alpha[idx] * np.exp(
-            -np.sum(a_mat[idx] * (x_arr - p_mat[idx]) ** 2, axis=1)
-        )
+        total += alpha[idx] * np.exp(-np.sum(a_mat[idx] * (x_arr - p_mat[idx]) ** 2, axis=1))
     return (-total).reshape(-1, 1)
 
 
 def currin_exponential(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Currin exponential function.
+    """
+    Evaluate the Currin exponential benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on ``[0, 1]^2``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="currin_exponential")
+    x_arr = _as_2d_array(x, 2, "currin_exponential")
     x1 = np.clip(x_arr[:, 0], 1.0e-6, 1.0)
     x2 = np.clip(x_arr[:, 1], 1.0e-6, 1.0)
     numerator = 2300.0 * x1 ** 3 + 1900.0 * x1 ** 2 + 2092.0 * x1 + 60.0
@@ -414,137 +299,81 @@ def currin_exponential(x: np.ndarray) -> np.ndarray:
 
 
 def currin_exponential_low_fidelity(x: np.ndarray) -> np.ndarray:
-    """Evaluate the standard low-fidelity Currin exponential approximation.
+    """
+    Evaluate the low-fidelity Currin approximation.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on ``[0, 1]^2``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Scalar low-fidelity responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="currin_exponential_low_fidelity")
-    shifts = np.array(
-        [[0.05, 0.05], [0.05, -0.05], [-0.05, 0.05], [-0.05, -0.05]],
-        dtype=np.float64,
-    )
+    x_arr = _as_2d_array(x, 2, "currin_exponential_low_fidelity")
+    shifts = np.array([[0.05, 0.05], [0.05, -0.05], [-0.05, 0.05], [-0.05, -0.05]], dtype=np.float64)
     values = []
     for shift in shifts:
         shifted = x_arr + shift
         shifted[:, 0] = np.clip(shifted[:, 0], 0.0, 1.0)
         shifted[:, 1] = np.clip(shifted[:, 1], 0.0, 1.0)
         values.append(currin_exponential(shifted)[:, 0])
-    y = 0.25 * np.sum(values, axis=0)
-    return y.reshape(-1, 1)
+    return (0.25 * np.sum(values, axis=0)).reshape(-1, 1)
 
 
 def park91b(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Park91B high-fidelity function.
+    """
+    Evaluate the Park91B high-fidelity benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 4)`` or ``(4,)`` on ``[0, 1]^4``.
+        x (np.ndarray): Query points. (N, 4) or (4,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly four features.
-
-    Shapes:
-        ``(N, 4) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=4, name="park91b")
-    y = (
-        (2.0 / 3.0) * np.exp(x_arr[:, 0] + x_arr[:, 1])
-        - x_arr[:, 3] * np.sin(x_arr[:, 2])
-        + x_arr[:, 2]
-    )
+    x_arr = _as_2d_array(x, 4, "park91b")
+    y = (2.0 / 3.0) * np.exp(x_arr[:, 0] + x_arr[:, 1]) - x_arr[:, 3] * np.sin(x_arr[:, 2]) + x_arr[:, 2]
     return y.reshape(-1, 1)
 
 
 def park91b_low_fidelity(x: np.ndarray) -> np.ndarray:
-    """Evaluate the Park91B low-fidelity approximation.
+    """
+    Evaluate the Park91B low-fidelity benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 4)`` or ``(4,)`` on ``[0, 1]^4``.
+        x (np.ndarray): Query points. (N, 4) or (4,).
 
     Returns:
-        np.ndarray: Scalar low-fidelity responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly four features.
-
-    Shapes:
-        ``(N, 4) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=4, name="park91b_low_fidelity")
-    y = 1.2 * park91b(x_arr)[:, 0] - 1.0
-    return y.reshape(-1, 1)
+    x_arr = _as_2d_array(x, 4, "park91b_low_fidelity")
+    return (1.2 * park91b(x_arr)[:, 0] - 1.0).reshape(-1, 1)
 
 
 def rastrigin(x: np.ndarray) -> np.ndarray:
-    """Evaluate the two-dimensional Rastrigin function.
+    """
+    Evaluate the Rastrigin benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on
-            ``[-5.12, 5.12]^2``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Scalar responses with shape ``(num_samples, 1)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 1)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Responses. (N, 1).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="rastrigin")
+    x_arr = _as_2d_array(x, 2, "rastrigin")
     y = 20.0 + np.sum(x_arr ** 2 - 10.0 * np.cos(2.0 * np.pi * x_arr), axis=1)
     return y.reshape(-1, 1)
 
 
 def vlmop2(x: np.ndarray) -> np.ndarray:
-    """Evaluate the VLMOP2 two-objective benchmark.
+    """
+    Evaluate the VLMOP2 benchmark.
 
     Args:
-        x: Input array with shape ``(num_samples, 2)`` or ``(2,)`` on
-            ``[-2, 2]^2``.
+        x (np.ndarray): Query points. (N, 2) or (2,).
 
     Returns:
-        np.ndarray: Objective values with shape ``(num_samples, 2)``.
-
-    Raises:
-        ValueError: If the input array does not have exactly two features.
-
-    Shapes:
-        ``(N, 2) -> (N, 2)``
-
-    Complexity:
-        Time ``O(N)`` and space ``O(N)``.
+        np.ndarray: Objective values. (N, 2).
     """
-
-    x_arr = _as_2d_array(x, expected_dim=2, name="vlmop2")
+    x_arr = _as_2d_array(x, 2, "vlmop2")
     shift = 1.0 / np.sqrt(2.0)
     f1 = 1.0 - np.exp(-((x_arr[:, 0] - shift) ** 2 + (x_arr[:, 1] - shift) ** 2))
     f2 = 1.0 - np.exp(-((x_arr[:, 0] + shift) ** 2 + (x_arr[:, 1] + shift) ** 2))
@@ -576,11 +405,7 @@ SCALAR_BENCHMARKS: Dict[str, ScalarBenchmark] = {
         description="Two-dimensional Branin-Hoo benchmark.",
         evaluator=branin,
         known_optimum=0.39788735772973816,
-        known_minimizers=(
-            (-np.pi, 12.275),
-            (np.pi, 2.275),
-            (3.0 * np.pi, 2.475),
-        ),
+        known_minimizers=((-np.pi, 12.275), (np.pi, 2.275), (3.0 * np.pi, 2.475)),
     ),
     "hartman3": ScalarBenchmark(
         name="hartman3",
@@ -665,24 +490,15 @@ MULTI_OBJECTIVE_BENCHMARKS: Dict[str, MultiObjectiveBenchmark] = {
 
 
 def get_scalar_benchmark(name: str) -> ScalarBenchmark:
-    """Fetch a scalar benchmark by name.
+    """
+    Fetch a scalar benchmark by name.
 
     Args:
-        name: Registry key of the requested benchmark.
+        name (str): Benchmark name.
 
     Returns:
-        ScalarBenchmark: The requested scalar benchmark specification.
-
-    Raises:
-        KeyError: If ``name`` is not in the scalar benchmark registry.
-
-    Shapes:
-        Not applicable.
-
-    Complexity:
-        Average-case lookup is ``O(1)`` time and ``O(1)`` space.
+        ScalarBenchmark: Requested scalar benchmark.
     """
-
     key = name.lower()
     if key not in SCALAR_BENCHMARKS:
         raise KeyError(f"Unknown scalar benchmark: '{name}'.")
@@ -690,24 +506,15 @@ def get_scalar_benchmark(name: str) -> ScalarBenchmark:
 
 
 def get_multifidelity_benchmark(name: str) -> MultiFidelityBenchmark:
-    """Fetch a multi-fidelity benchmark by name.
+    """
+    Fetch a multi-fidelity benchmark by name.
 
     Args:
-        name: Registry key of the requested benchmark.
+        name (str): Benchmark name.
 
     Returns:
-        MultiFidelityBenchmark: The requested paired benchmark specification.
-
-    Raises:
-        KeyError: If ``name`` is not in the multi-fidelity benchmark registry.
-
-    Shapes:
-        Not applicable.
-
-    Complexity:
-        Average-case lookup is ``O(1)`` time and ``O(1)`` space.
+        MultiFidelityBenchmark: Requested multi-fidelity benchmark.
     """
-
     key = name.lower()
     if key not in MULTI_FIDELITY_BENCHMARKS:
         raise KeyError(f"Unknown multi-fidelity benchmark: '{name}'.")
@@ -715,24 +522,15 @@ def get_multifidelity_benchmark(name: str) -> MultiFidelityBenchmark:
 
 
 def get_multiobjective_benchmark(name: str) -> MultiObjectiveBenchmark:
-    """Fetch a multi-objective benchmark by name.
+    """
+    Fetch a multi-objective benchmark by name.
 
     Args:
-        name: Registry key of the requested benchmark.
+        name (str): Benchmark name.
 
     Returns:
-        MultiObjectiveBenchmark: The requested multi-objective specification.
-
-    Raises:
-        KeyError: If ``name`` is not in the multi-objective benchmark registry.
-
-    Shapes:
-        Not applicable.
-
-    Complexity:
-        Average-case lookup is ``O(1)`` time and ``O(1)`` space.
+        MultiObjectiveBenchmark: Requested multi-objective benchmark.
     """
-
     key = name.lower()
     if key not in MULTI_OBJECTIVE_BENCHMARKS:
         raise KeyError(f"Unknown multi-objective benchmark: '{name}'.")
