@@ -1,24 +1,16 @@
-# Engineering Abaqus benchmark configuration for SurrogateLab
+# Engineering case workflow configuration for SurrogateLab
 # Author: Shengning Wang
 
 from __future__ import annotations
-
 import argparse
 from collections import OrderedDict
-from typing import Iterable, List
+from typing import List
 
 import numpy as np
 
 
-ALGORITHM_ORDER = ["A", "B", "C", "D", "E", "F", "I", "J"]
-
-DEMO_ALIAS_MAP = {
-    "all": ALGORITHM_ORDER,
-    "ensemble": ["A", "B"],
-    "multifidelity": ["C", "D", "E"],
-    "active_learning": ["F"],
-    "optimization": ["I", "J"],
-}
+ALGORITHM_ORDER = ["TAHS", "AESMSI", "MFSMLS", "MMFS", "CCAMFS", "DISO", "MIGA", "CFARSSDA"]
+DEFAULT_DEMOS = list(ALGORITHM_ORDER)
 
 TARGET_SPECS = OrderedDict(
     {
@@ -59,40 +51,17 @@ DEFAULT_THRESHOLD_PARAMS = {
     "active_learning_min_relative_gain": 0.20,
     "weight_constraint_ub": 0.31,
 }
-
-
-def _expand_demo_selection(selection: Iterable[str]) -> List[str]:
-    """
-    Expand demo aliases into ordered labels.
-
-    Args:
-        selection (Iterable[str]): Demo labels or aliases.
-
-    Returns:
-        List[str]: Ordered demo labels.
-    """
-    expanded: List[str] = []
-    for item in selection:
-        key = item.lower()
-        expanded.extend(DEMO_ALIAS_MAP.get(key, [item.upper()]))
-
-    ordered: List[str] = []
-    for label in ALGORITHM_ORDER:
-        if label in expanded:
-            ordered.append(label)
-    return ordered
+DEFAULT_SAMPLE_COUNTS = {
+    "num_train": 30,
+    "num_test": 50,
+    "num_lf": 30,
+    "num_hf": 15,
+    "num_active_initial": 3,
+    "num_infill": 21,
+}
 
 
 def _expand_target_selection(selection: List[str]) -> List[str]:
-    """
-    Expand target aliases into ordered engineering targets.
-
-    Args:
-        selection (List[str]): Requested target names.
-
-    Returns:
-        List[str]: Ordered target names.
-    """
     if len(selection) == 1 and selection[0].lower() == "all":
         return list(TARGET_SPECS.keys())
 
@@ -106,23 +75,23 @@ def _expand_target_selection(selection: List[str]) -> List[str]:
 
 def get_args() -> argparse.Namespace:
     """
-    Parse command-line arguments for the Abaqus engineering workflow.
+    Parse command-line arguments for the engineering case workflow.
 
     Returns:
-        argparse.Namespace: Parsed engineering configuration.
+        argparse.Namespace: Parsed case configuration.
     """
-    parser = argparse.ArgumentParser(description="SurrogateLab Abaqus engineering benchmark runner.")
+    parser = argparse.ArgumentParser(description="SurrogateLab engineering case workflow runner.")
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--save_dir", type=str, default="./abaqus_outputs", help="Directory for cached data and reports.")
+    parser.add_argument("--seed_mode", type=str, default="single_seed", help="Run mode written into payload metadata.")
     parser.add_argument(
         "--demos",
         nargs="+",
-        default=["all"],
-        help="Algorithms to run: A B C D E F I J or aliases all / ensemble / multifidelity / active_learning / optimization.",
+        choices=ALGORITHM_ORDER,
+        default=DEFAULT_DEMOS,
+        help="Algorithms to run: TAHS AESMSI MFSMLS MMFS CCAMFS DISO MIGA CFARSSDA.",
     )
     parser.add_argument("--targets", nargs="+", default=["all"], help="Engineering targets: weight / stress_skin / all.")
-    parser.add_argument("--visualize", action="store_true", help="Save summary figures to save_dir.")
 
     parser.add_argument("--num_features", type=int, default=3, help="Number of design variables.")
     parser.add_argument("--num_outputs", type=int, default=4, help="Number of simulation outputs.")
@@ -131,15 +100,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--input_names", type=str, nargs="+", default=DEFAULT_INPUT_NAMES, help="Input variable names.")
     parser.add_argument("--output_names", type=str, nargs="+", default=DEFAULT_OUTPUT_NAMES, help="Output variable names.")
 
-    parser.add_argument("--num_train", type=int, default=12, help="Number of HF training samples.")
-    parser.add_argument("--num_test", type=int, default=10, help="Number of HF test samples.")
-    parser.add_argument("--num_lf", type=int, default=80, help="Number of LF samples.")
-    parser.add_argument("--num_hf", type=int, default=30, help="Number of MF HF samples.")
-    parser.add_argument("--num_active_initial", type=int, default=2, help="Number of initial HF samples for engineering active learning.")
-    parser.add_argument("--num_infill", type=int, default=10, help="Number of active-learning infill iterations.")
+    parser.add_argument("--num_train", type=int, default=None, help="Number of HF training samples for ensemble and optimization.")
+    parser.add_argument("--num_test", type=int, default=None, help="Number of HF test samples.")
+    parser.add_argument("--num_lf", type=int, default=None, help="Number of LF samples for multi-fidelity runs.")
+    parser.add_argument("--num_hf", type=int, default=None, help="Number of HF samples for multi-fidelity runs.")
+    parser.add_argument("--num_active_initial", type=int, default=None, help="Number of initial HF samples for active learning.")
+    parser.add_argument("--num_infill", type=int, default=None, help="Number of active-learning infill iterations.")
     parser.add_argument("--lhs_iterations", type=int, default=50, help="Maximin LHS search iterations.")
 
-    parser.add_argument("--ensemble_threshold", type=float, default=0.5, help="Threshold used by TAHS and AES-MSI.")
+    parser.add_argument("--ensemble_threshold", type=float, default=0.5, help="Threshold used by TAHS and AESMSI.")
     parser.add_argument(
         "--ensemble_min_relative_gain",
         type=float,
@@ -171,7 +140,19 @@ def get_args() -> argparse.Namespace:
         help="Lower and upper bounds for KRG theta.",
     )
 
-    parser.add_argument("--mf_poly_degree", type=int, default=2, help="Polynomial degree for MFS-MLS.")
+    parser.add_argument("--mf_poly_degree", type=int, default=2, help="Polynomial degree for MFSMLS.")
+    parser.add_argument(
+        "--mfs_mls_neighbor_factor",
+        type=float,
+        default=2.0,
+        help="Neighborhood expansion factor used by MFSMLS local fitting.",
+    )
+    parser.add_argument(
+        "--mfs_mls_ridge",
+        type=float,
+        default=1.0e-4,
+        help="Ridge regularization used by MFSMLS local fitting.",
+    )
     parser.add_argument(
         "--mf_sigma_bounds",
         type=float,
@@ -218,12 +199,20 @@ def get_args() -> argparse.Namespace:
         default=DEFAULT_MIGA_PARAMS["migration_size"],
         help="Number of migrants exchanged by MIGA.",
     )
-    parser.add_argument("--df_popsize", type=int, default=DEFAULT_DRAGONFLY_PARAMS["popsize"], help="CFSSDA population multiplier.")
-    parser.add_argument("--df_maxiter", type=int, default=DEFAULT_DRAGONFLY_PARAMS["maxiter"], help="Maximum CFSSDA iterations.")
+    parser.add_argument("--df_popsize", type=int, default=DEFAULT_DRAGONFLY_PARAMS["popsize"], help="CFARSSDA population multiplier.")
+    parser.add_argument("--df_maxiter", type=int, default=DEFAULT_DRAGONFLY_PARAMS["maxiter"], help="Maximum CFARSSDA iterations.")
     parser.add_argument("--opt_tol", type=float, default=1.0e-6, help="Stopping tolerance for the optimizers.")
 
     args = parser.parse_args()
-    args.demos = _expand_demo_selection(args.demos)
+    args.num_train = DEFAULT_SAMPLE_COUNTS["num_train"] if args.num_train is None else args.num_train
+    args.num_test = DEFAULT_SAMPLE_COUNTS["num_test"] if args.num_test is None else args.num_test
+    args.num_lf = DEFAULT_SAMPLE_COUNTS["num_lf"] if args.num_lf is None else args.num_lf
+    args.num_hf = DEFAULT_SAMPLE_COUNTS["num_hf"] if args.num_hf is None else args.num_hf
+    args.num_active_initial = DEFAULT_SAMPLE_COUNTS["num_active_initial"] if args.num_active_initial is None else args.num_active_initial
+    args.num_infill = DEFAULT_SAMPLE_COUNTS["num_infill"] if args.num_infill is None else args.num_infill
+
+    args.workflow = "case"
+    args.demos = list(dict.fromkeys(args.demos))
     args.targets = _expand_target_selection(args.targets)
     args.bounds = np.asarray(list(zip(args.bounds_lower, args.bounds_upper)), dtype=np.float64)
     args.krg_params = {

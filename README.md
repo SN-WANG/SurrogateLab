@@ -11,7 +11,7 @@
 SurrogateLab currently has two main tracks:
 
 - analytic benchmark validation through `bench_main.py`
-- engineering-style Abaqus workflow validation through `abaqus_main.py`
+- engineering-case validation through `case_main.py`
 
 The repository is designed around the ten contract-facing algorithm demos:
 
@@ -31,8 +31,8 @@ accuracy = (1 - sum(|GT - Pred|) / (sum(|GT|) + eps)) * 100%
 - Classical surrogate models: `PRS`, `RBF`, `KRG`, `SVR`
 - Ensemble models: `TAHS`, `AESMSI`
 - Multi-fidelity models: `MFSMLS`, `MMFS`, `CCAMFS`
-- Single-objective distance-informed active learning via `DISOInfill`
-- WSNet-synced optimization backends: `MIGA`, `CFSSDA`
+- Single-objective distance-informed active learning via `DISO`
+- WSNet-synced optimization backends: `MIGA`, `CFARSSDA`
 - Two clean entry points for analytic and engineering workflows
 
 ## 🧪 Current Coverage
@@ -46,12 +46,12 @@ accuracy = (1 - sum(|GT - Pred|) / (sum(|GT|) + eps)) * 100%
 - 1 multi-objective active-learning benchmark
 - 3 unconstrained optimization benchmark functions
 
-### Engineering Abaqus-style suite
+### Engineering Case Suite
 
 - Engineering targets: `weight` and `stress_skin`
 - 4 ensemble validation runs
 - 6 multi-fidelity validation runs
-- 2 single-objective active-learning validation runs with `DISOInfill`
+- 2 single-objective active-learning validation runs with `DISO`
 - 2 constrained optimization runs with `stress_skin` as the objective and `weight <= 0.31` as the constraint
 
 ## 🧱 Repository Layout
@@ -61,8 +61,8 @@ SurrogateLab/
 ├── bench_main.py
 ├── bench_config.py
 ├── bench_funcs.py
-├── abaqus_main.py
-├── abaqus_config.py
+├── case_main.py
+├── case_config.py
 ├── models/
 │   ├── classical/
 │   ├── ensemble/
@@ -91,37 +91,37 @@ cd SurrogateLab
 ### Install the dependencies you need
 
 ```bash
-pip install numpy scipy matplotlib torch tqdm
+pip install numpy scipy torch tqdm
 ```
 
 ### Run the analytic benchmark suite
 
 ```bash
-python bench_main.py --demos all
+python bench_main.py
 ```
 
-This writes a JSON report to `benchmark_outputs/benchmark_results.json` by default.
+This writes `bench_results.json` to the repository root.
 
-### Run the engineering Abaqus-style suite
+### Run the engineering case suite
 
 ```bash
-python abaqus_main.py --demos all --visualize
+python case_main.py
 ```
 
-This writes a JSON report to `abaqus_outputs/engineering_results.json` by default.
+This writes `case_doe_cache.npy` and `case_results.json` to the repository root.
 
 ### Run only the active-learning demos
 
 ```bash
-python bench_main.py --demos F G H
-python abaqus_main.py --demos F
+python bench_main.py --demos DISO MICO MOBO
+python case_main.py --demos DISO
 ```
 
 ### Run only the optimization demos
 
 ```bash
-python bench_main.py --demos I J
-python abaqus_main.py --demos I J
+python bench_main.py --demos MIGA CFARSSDA
+python case_main.py --demos MIGA CFARSSDA
 ```
 
 ## 🔗 Relationship to WSNet

@@ -1,8 +1,7 @@
-# Engineering Abaqus benchmark runner for SurrogateLab
+# Engineering case workflow for SurrogateLab
 # Author: Shengning Wang
 
 from __future__ import annotations
-
 import json
 import os
 import random
@@ -12,7 +11,7 @@ from typing import Any, Dict, List
 import numpy as np
 from scipy.optimize import NonlinearConstraint
 
-import abaqus_config
+import case_config
 
 try:
     from wing_structure_simulation import AbaqusModel as _ExternalAbaqusModel
@@ -37,7 +36,11 @@ from utils.seeder import seed_everything
 
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ABAQUS_RUNTIME: Dict[str, Any] | None = None
+CASE_DOE_CACHE_NAME = "case_doe_cache.npy"
+CASE_RESULTS_NAME = "case_results.json"
+CASE_DOE_CACHE_PATH = os.path.join(PROJECT_DIR, CASE_DOE_CACHE_NAME)
+CASE_RESULTS_PATH = os.path.join(PROJECT_DIR, CASE_RESULTS_NAME)
+_CASE_RUNTIME: Dict[str, Any] | None = None
 
 
 class _LocalProxyAbaqusModel:
@@ -118,28 +121,23 @@ class _ExternalAbaqusModelAdapter:
         finally:
             os.chdir(current_dir)
 
-def _get_external_abaqus_command() -> str | None:
-    """
-    Return the Abaqus command configured by the external solver wrapper.
 
-    Returns:
-        str | None: Command name or None when the interface file is missing.
-    """
+def _get_external_abaqus_command() -> str | None:
     if _ExternalAbaqusModel is None:
         return None
     return _ExternalAbaqusModel().abaqus_cmd.split()[0]
 
 
-def get_abaqus_runtime() -> Dict[str, Any]:
+def get_case_runtime() -> Dict[str, Any]:
     """
     Detect the available Abaqus runtime backend.
 
     Returns:
-        Dict[str, Any]: Runtime status for solver selection and logging.
+        Dict[str, Any]: Runtime status for solver selection and reporting.
     """
-    global _ABAQUS_RUNTIME
-    if _ABAQUS_RUNTIME is not None:
-        return _ABAQUS_RUNTIME
+    global _CASE_RUNTIME
+    if _CASE_RUNTIME is not None:
+        return _CASE_RUNTIME
 
     command_name = _get_external_abaqus_command()
     interface_available = _ExternalAbaqusModel is not None
@@ -147,23 +145,26 @@ def get_abaqus_runtime() -> Dict[str, Any]:
     available = interface_available and command_available
     backend = "EXTERNAL_SOLVER" if available else "LOCAL_PROXY"
 
-    _ABAQUS_RUNTIME = {
+    _CASE_RUNTIME = {
+        "solver": "abaqus",
         "interface_available": interface_available,
         "command_name": command_name,
         "command_available": command_available,
         "available": available,
         "backend": backend,
-        "cache_tag": backend.lower(),
     }
-    return _ABAQUS_RUNTIME
+    return _CASE_RUNTIME
 
 
-def log_abaqus_runtime(runtime: Dict[str, Any]) -> None:
+get_abaqus_runtime = get_case_runtime
+
+
+def log_case_runtime(runtime: Dict[str, Any]) -> None:
     """
     Print a high-visibility Abaqus runtime banner.
 
     Args:
-        runtime (Dict[str, Any]): Runtime status returned by get_abaqus_runtime.
+        runtime (Dict[str, Any]): Runtime status returned by get_case_runtime.
     """
     line = "=" * 78
     availability_color = hue.g if runtime["available"] else hue.r
@@ -177,20 +178,19 @@ def log_abaqus_runtime(runtime: Dict[str, Any]) -> None:
     logger.info(line)
 
 
+log_abaqus_runtime = log_case_runtime
+
+
 class AbaqusModel:
     """
     Runtime-selecting engineering solver wrapper.
-
-    This class keeps a stable call contract for the engineering workflow while
-    selecting the external Abaqus solver when it is available, otherwise
-    falling back to the local analytic proxy.
 
     Args:
         fidelity (str): Simulation fidelity, "high" or "low".
     """
 
     def __init__(self, fidelity: str = "high") -> None:
-        runtime = get_abaqus_runtime()
+        runtime = get_case_runtime()
         model_cls = _ExternalAbaqusModelAdapter if runtime["available"] else _LocalProxyAbaqusModel
         self.backend = runtime["backend"]
         self.model = model_cls(fidelity=fidelity)
@@ -414,13 +414,40 @@ def get_target_specs(args: Any) -> List[Dict[str, Any]]:
     """
     specs: List[Dict[str, Any]] = []
     for name in args.targets:
-        target = dict(abaqus_config.TARGET_SPECS[name])
+        target = dict(case_config.TARGET_SPECS[name])
         target["name"] = name
         specs.append(target)
     return specs
 
 
-def generate_and_cache_doe(args: Any) -> Dict[str, np.ndarray]:
+def build_cache_meta(args: Any, runtime: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build the signature stored inside the unified case DOE cache.
+
+    Args:
+        args (Any): Parsed arguments.
+        runtime (Dict[str, Any]): Runtime backend metadata.
+
+    Returns:
+        Dict[str, Any]: Cache metadata signature.
+    """
+    return {
+        "workflow": "case",
+        "seed_mode": args.seed_mode,
+        "seed": args.seed,
+        "backend": runtime["backend"],
+        "num_features": args.num_features,
+        "num_outputs": args.num_outputs,
+        "bounds": args.bounds.tolist(),
+        "num_train": args.num_train,
+        "num_test": args.num_test,
+        "num_lf": args.num_lf,
+        "num_hf": args.num_hf,
+        "lhs_iterations": args.lhs_iterations,
+    }
+
+
+def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
     """
     Generate or load the cached engineering DOE dataset.
 
@@ -430,19 +457,24 @@ def generate_and_cache_doe(args: Any) -> Dict[str, np.ndarray]:
     Returns:
         Dict[str, np.ndarray]: Cached engineering data.
     """
-    runtime = get_abaqus_runtime()
-    cache_path = os.path.join(args.save_dir, f"abaqus_doe_cache_{runtime['cache_tag']}.npy")
-    if os.path.isfile(cache_path):
-        logger.info(f"{hue.g}Load cached engineering DOE from {cache_path}{hue.q}")
-        return np.load(cache_path, allow_pickle=True).item()
+    runtime = get_case_runtime()
+    meta = build_cache_meta(args, runtime)
 
-    logger.info(f"{hue.b}Generate engineering DOE data{hue.q}")
+    if os.path.isfile(CASE_DOE_CACHE_PATH):
+        cached = np.load(CASE_DOE_CACHE_PATH, allow_pickle=True).item()
+        if cached.get("meta") == meta:
+            logger.info(f"{hue.g}Load cached case DOE from {CASE_DOE_CACHE_PATH}{hue.q}")
+            return cached
+        logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {CASE_DOE_CACHE_PATH}{hue.q}")
+
+    logger.info(f"{hue.b}Generate case DOE data{hue.q}")
     x_train = sample_lhs(args.bounds, args.num_train, args.lhs_iterations)
     x_test = sample_lhs(args.bounds, args.num_test, args.lhs_iterations)
     x_lf = sample_lhs(args.bounds, args.num_lf, args.lhs_iterations)
     x_hf = sample_lhs(args.bounds, args.num_hf, args.lhs_iterations)
 
     data = {
+        "meta": meta,
         "x_train": x_train,
         "y_train": run_abaqus_batch(x_train, fidelity="high"),
         "x_test": x_test,
@@ -453,8 +485,7 @@ def generate_and_cache_doe(args: Any) -> Dict[str, np.ndarray]:
         "y_hf": run_abaqus_batch(x_hf, fidelity="high"),
     }
 
-    os.makedirs(args.save_dir, exist_ok=True)
-    np.save(cache_path, data, allow_pickle=True)
+    np.save(CASE_DOE_CACHE_PATH, data, allow_pickle=True)
     logger.info(
         f"  train={data['x_train'].shape} | test={data['x_test'].shape} | "
         f"lf={data['x_lf'].shape} | hf={data['x_hf'].shape}"
@@ -464,7 +495,7 @@ def generate_and_cache_doe(args: Any) -> Dict[str, np.ndarray]:
 
 def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[str, Any]]:
     """
-    Run the engineering ensemble-model benchmarks.
+    Run the engineering ensemble-model cases.
 
     Args:
         args (Any): Parsed arguments.
@@ -480,12 +511,12 @@ def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[st
         "SVR": lambda: SVR(),
     }
     ensemble_builders = {
-        "A": ("TAHS", lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params)),
-        "B": ("AESMSI", lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params)),
+        "TAHS": lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params),
+        "AESMSI": lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params),
     }
 
     results: List[Dict[str, Any]] = []
-    logger.info(f"{hue.b}Engineering Ensemble Cases{hue.q}")
+    logger.info(f"{hue.b}Case Ensemble{hue.q}")
 
     for target in get_target_specs(args):
         y_train = select_output(data["y_train"], target["output_idx"])
@@ -495,11 +526,7 @@ def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[st
         for model_name, builder in single_model_builders.items():
             model = builder()
             model.fit(data["x_train"], y_train)
-            baseline_scores[model_name] = evaluate_metrics(
-                y_test,
-                predict_mean(model, data["x_test"]),
-                eps=args.metric_eps,
-            )
+            baseline_scores[model_name] = evaluate_metrics(y_test, predict_mean(model, data["x_test"]), eps=args.metric_eps)
 
         mean_single_accuracy = float(np.mean([item["accuracy"] for item in baseline_scores.values()]))
         record = {
@@ -510,8 +537,8 @@ def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[st
         }
         logger.info(f"  {target['label']} | baseline acc={hue.c}{mean_single_accuracy:.2f}%{hue.q}")
 
-        for demo_label, (algo_name, builder) in ensemble_builders.items():
-            if demo_label not in args.demos:
+        for algo_name, builder in ensemble_builders.items():
+            if algo_name not in args.demos:
                 continue
 
             model = builder()
@@ -537,7 +564,7 @@ def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[st
 
 def run_multifidelity_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[str, Any]]:
     """
-    Run the engineering multi-fidelity benchmarks.
+    Run the engineering multi-fidelity cases.
 
     Args:
         args (Any): Parsed arguments.
@@ -547,13 +574,17 @@ def run_multifidelity_section(args: Any, data: Dict[str, np.ndarray]) -> List[Di
         List[Dict[str, Any]]: Target-wise benchmark records.
     """
     model_builders = {
-        "C": ("MFSMLS", lambda: MFSMLS(poly_degree=args.mf_poly_degree)),
-        "D": ("MMFS", lambda: MMFS(sigma_bounds=tuple(args.mf_sigma_bounds))),
-        "E": ("CCAMFS", lambda: CCAMFS()),
+        "MFSMLS": lambda: MFSMLS(
+            poly_degree=args.mf_poly_degree,
+            neighbor_factor=args.mfs_mls_neighbor_factor,
+            ridge=args.mfs_mls_ridge,
+        ),
+        "MMFS": lambda: MMFS(sigma_bounds=tuple(args.mf_sigma_bounds)),
+        "CCAMFS": lambda: CCAMFS(),
     }
 
     results: List[Dict[str, Any]] = []
-    logger.info(f"{hue.b}Engineering Multi-Fidelity Cases{hue.q}")
+    logger.info(f"{hue.b}Case Multi-Fidelity{hue.q}")
 
     for target in get_target_specs(args):
         y_lf = select_output(data["y_lf"], target["output_idx"])
@@ -566,8 +597,8 @@ def run_multifidelity_section(args: Any, data: Dict[str, np.ndarray]) -> List[Di
         }
         logger.info(f"  {target['label']} | target acc>={args.mf_min_accuracy:.2f}%")
 
-        for demo_label, (algo_name, builder) in model_builders.items():
-            if demo_label not in args.demos:
+        for algo_name, builder in model_builders.items():
+            if algo_name not in args.demos:
                 continue
 
             model = builder()
@@ -598,7 +629,7 @@ def run_active_learning_section(args: Any, data: Dict[str, np.ndarray]) -> List[
         List[Dict[str, Any]]: Target-wise active-learning records.
     """
     results: List[Dict[str, Any]] = []
-    logger.info(f"{hue.b}Engineering Active-Learning Cases{hue.q}")
+    logger.info(f"{hue.b}Case Active Learning{hue.q}")
     x_initial = sample_lhs(args.bounds, args.num_active_initial, args.lhs_iterations)
     y_initial_full = run_abaqus_batch(x_initial, fidelity="high")
 
@@ -644,6 +675,7 @@ def run_active_learning_section(args: Any, data: Dict[str, np.ndarray]) -> List[
         results.append(
             {
                 "target": target["name"],
+                "algorithm": "DISO",
                 "criterion": args.infill_criterion,
                 "num_initial": int(args.num_active_initial),
                 "num_infill": args.num_infill,
@@ -669,63 +701,58 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
     Returns:
         List[Dict[str, Any]]: Optimization records.
     """
-    objective_idx = abaqus_config.TARGET_SPECS[args.opt_target]["output_idx"]
-    constraint_idx = abaqus_config.TARGET_SPECS[args.opt_constraint_target]["output_idx"]
+    objective_idx = case_config.TARGET_SPECS[args.opt_target]["output_idx"]
+    constraint_idx = case_config.TARGET_SPECS[args.opt_constraint_target]["output_idx"]
     model = fit_krg(data["x_train"], data["y_train"], args)
     x0 = data["x_train"][np.argmin(data["y_train"][:, objective_idx])]
     hf_model = AbaqusModel(fidelity="high")
 
     def objective(x_vec: np.ndarray) -> float:
-        mean, _ = model.predict(np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
+        mean = predict_mean(model, np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
         return float(mean[0, objective_idx])
 
     def constraint_fun(x_vec: np.ndarray) -> float:
-        mean, _ = model.predict(np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
+        mean = predict_mean(model, np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
         return float(mean[0, constraint_idx])
 
     constraint = NonlinearConstraint(fun=constraint_fun, lb=-np.inf, ub=args.opt_constraint_ub)
     optimizers = {
-        "I": (
-            "MIGA",
-            lambda: multi_island_genetic_optimize(
-                func=objective,
-                bounds=[tuple(bound) for bound in args.bounds],
-                constraints=constraint,
-                x0=x0,
-                tol=args.opt_tol,
-                seed=args.seed,
-                multi_objective=False,
-                **args.miga_params,
-            ),
+        "MIGA": lambda: multi_island_genetic_optimize(
+            func=objective,
+            bounds=[tuple(bound) for bound in args.bounds],
+            constraints=constraint,
+            x0=x0,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=False,
+            **args.miga_params,
         ),
-        "J": (
-            "CFSSDA",
-            lambda: dragonfly_optimize(
-                func=objective,
-                bounds=[tuple(bound) for bound in args.bounds],
-                constraints=constraint,
-                x0=x0,
-                tol=args.opt_tol,
-                seed=args.seed,
-                multi_objective=False,
-                **args.df_params,
-            ),
+        "CFARSSDA": lambda: dragonfly_optimize(
+            func=objective,
+            bounds=[tuple(bound) for bound in args.bounds],
+            constraints=constraint,
+            x0=x0,
+            tol=args.opt_tol,
+            seed=args.seed,
+            multi_objective=False,
+            **args.df_params,
         ),
     }
 
     results: List[Dict[str, Any]] = []
     logger.info(
-        f"{hue.b}Engineering Optimization Cases{hue.q} | "
+        f"{hue.b}Case Optimization{hue.q} | "
         f"objective={args.opt_target} | constraint={args.opt_constraint_target}<={args.opt_constraint_ub:.3f}"
     )
 
-    for demo_label, (algo_name, builder) in optimizers.items():
-        if demo_label not in args.demos:
+    for algo_name, builder in optimizers.items():
+        if algo_name not in args.demos:
             continue
 
         result = builder()
         verified = hf_model.run(result.x)
         predicted_constraint = constraint_fun(result.x)
+        satisfied = bool(verified[constraint_idx] <= args.opt_constraint_ub)
         record = {
             "algorithm": algo_name,
             "x_best": result.x,
@@ -734,7 +761,8 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
             "verified_objective": float(verified[objective_idx]),
             "verified_constraint": float(verified[constraint_idx]),
             "constraint_upper_bound": args.opt_constraint_ub,
-            "constraint_satisfied": bool(verified[constraint_idx] <= args.opt_constraint_ub),
+            "constraint_satisfied": satisfied,
+            "passed": satisfied,
             "nit": getattr(result, "nit", None),
             "success": getattr(result, "success", None),
         }
@@ -748,199 +776,75 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
     return results
 
 
-def plot_metric_section(section_name: str, records: List[Dict[str, Any]], save_path: str) -> None:
+def save_results(payload: Dict[str, Any]) -> str:
     """
-    Save a simple accuracy/R2 summary plot for one section.
+    Save the case payload as JSON.
 
     Args:
-        section_name (str): Section name.
-        records (List[Dict[str, Any]]): Section records.
-        save_path (str): Output path.
-    """
-    import matplotlib.pyplot as plt
-
-    labels: List[str] = []
-    accuracy: List[float] = []
-    r2_values: List[float] = []
-    for record in records:
-        target = record["target"]
-        for algo_name, metrics in record["algorithms"].items():
-            labels.append(f"{target}:{algo_name}")
-            accuracy.append(metrics["accuracy"])
-            r2_values.append(metrics["r2"])
-
-    if not labels:
-        return
-
-    x = np.arange(len(labels))
-    fig, axes = plt.subplots(1, 2, figsize=(max(8, len(labels) * 1.4), 4))
-    axes[0].bar(x, accuracy, color="tab:blue")
-    axes[0].set_title(f"{section_name} Accuracy")
-    axes[0].set_ylabel("Accuracy (%)")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(labels, rotation=30, ha="right")
-    axes[0].grid(True, axis="y", alpha=0.3)
-
-    axes[1].bar(x, r2_values, color="tab:orange")
-    axes[1].set_title(f"{section_name} R2")
-    axes[1].set_ylabel("R2")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(labels, rotation=30, ha="right")
-    axes[1].grid(True, axis="y", alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-
-
-def plot_active_learning(records: List[Dict[str, Any]], save_path: str) -> None:
-    """
-    Save a before/after active-learning accuracy plot.
-
-    Args:
-        records (List[Dict[str, Any]]): Active-learning records.
-        save_path (str): Output path.
-    """
-    import matplotlib.pyplot as plt
-
-    labels = [record["target"] for record in records]
-    acc_before = [record["before"]["accuracy"] for record in records]
-    acc_after = [record["after"]["accuracy"] for record in records]
-    x = np.arange(len(labels))
-    width = 0.35
-
-    fig, ax = plt.subplots(figsize=(max(6, len(labels) * 2.0), 4))
-    ax.bar(x - width / 2.0, acc_before, width, label="Before", color="tab:gray")
-    ax.bar(x + width / 2.0, acc_after, width, label="After", color="tab:green")
-    ax.set_ylabel("Accuracy (%)")
-    ax.set_title("Engineering Active Learning")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.legend()
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-
-
-def plot_optimization(records: List[Dict[str, Any]], save_path: str) -> None:
-    """
-    Save a simple optimization verification plot.
-
-    Args:
-        records (List[Dict[str, Any]]): Optimization records.
-        save_path (str): Output path.
-    """
-    import matplotlib.pyplot as plt
-
-    labels = [record["algorithm"] for record in records]
-    objectives = [record["verified_objective"] for record in records]
-    constraints = [record["verified_constraint"] for record in records]
-    ub = records[0]["constraint_upper_bound"]
-    x = np.arange(len(labels))
-
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    axes[0].bar(x, objectives, color="tab:blue")
-    axes[0].set_title("Verified Objective")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(labels)
-    axes[0].grid(True, axis="y", alpha=0.3)
-
-    axes[1].bar(x, constraints, color="tab:orange")
-    axes[1].axhline(ub, color="tab:red", linestyle="--", linewidth=1.5)
-    axes[1].set_title("Verified Constraint")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(labels)
-    axes[1].grid(True, axis="y", alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-
-
-def save_results(args: Any, payload: Dict[str, Any]) -> str:
-    """
-    Save the engineering payload as JSON.
-
-    Args:
-        args (Any): Parsed arguments.
-        payload (Dict[str, Any]): Engineering payload.
+        payload (Dict[str, Any]): Case payload.
 
     Returns:
         str: Absolute save path.
     """
-    os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.abspath(os.path.join(args.save_dir, "engineering_results.json"))
-    with open(save_path, "w", encoding="utf-8") as file:
+    with open(CASE_RESULTS_PATH, "w", encoding="utf-8") as file:
         json.dump(to_serializable(payload), file, indent=2)
-    return save_path
+    return CASE_RESULTS_PATH
 
 
-def maybe_visualize(args: Any, payload: Dict[str, Any]) -> None:
+def run_case(args: Any) -> Dict[str, Any]:
     """
-    Save section summary figures when visualization is enabled.
+    Execute the full engineering case workflow.
 
     Args:
         args (Any): Parsed arguments.
-        payload (Dict[str, Any]): Engineering payload.
-    """
-    if not args.visualize:
-        return
 
-    os.makedirs(args.save_dir, exist_ok=True)
-    if "ensemble" in payload:
-        plot_metric_section("Ensemble", payload["ensemble"], os.path.join(args.save_dir, "fig_ensemble_engineering.png"))
-    if "multifidelity" in payload:
-        plot_metric_section(
-            "Multi-Fidelity",
-            payload["multifidelity"],
-            os.path.join(args.save_dir, "fig_multifidelity_engineering.png"),
-        )
-    if "active_learning" in payload:
-        plot_active_learning(payload["active_learning"], os.path.join(args.save_dir, "fig_active_learning_engineering.png"))
-    if "optimization" in payload:
-        plot_optimization(payload["optimization"], os.path.join(args.save_dir, "fig_optimization_engineering.png"))
-
-
-def main() -> None:
+    Returns:
+        Dict[str, Any]: Case payload.
     """
-    Execute the full Abaqus engineering workflow.
-    """
-    args = abaqus_config.get_args()
     seed_everything(args.seed)
     reset_random_state(args.seed)
-    runtime = get_abaqus_runtime()
+    runtime = get_case_runtime()
 
-    logger.info(f"{hue.b}SurrogateLab Abaqus Engineering Workflow{hue.q}")
-    log_abaqus_runtime(runtime)
+    logger.info(f"{hue.b}SurrogateLab Case Workflow{hue.q}")
+    log_case_runtime(runtime)
     logger.info(f"  demos    : {args.demos}")
     logger.info(f"  targets  : {args.targets}")
-    logger.info(f"  save_dir : {args.save_dir}")
 
-    data = generate_and_cache_doe(args)
+    data = generate_case_doe(args)
     payload: Dict[str, Any] = {
+        "workflow": "case",
+        "seed_mode": args.seed_mode,
         "seed": args.seed,
         "demos": args.demos,
         "targets": args.targets,
         "runtime": runtime,
+        "sample_counts": {
+            "num_train": args.num_train,
+            "num_test": args.num_test,
+            "num_lf": args.num_lf,
+            "num_hf": args.num_hf,
+            "num_active_initial": args.num_active_initial,
+            "num_infill": args.num_infill,
+        },
         "thresholds": {
             "ensemble_min_relative_gain": args.ensemble_min_relative_gain,
             "mf_min_accuracy": args.mf_min_accuracy,
             "active_learning_min_relative_gain": args.active_learning_min_relative_gain,
             "weight_constraint_ub": args.opt_constraint_ub,
         },
+        "outputs": {
+            "doe_cache": CASE_DOE_CACHE_NAME,
+            "results": CASE_RESULTS_NAME,
+        },
     }
 
-    if any(label in args.demos for label in ["A", "B"]):
+    if any(name in args.demos for name in ["TAHS", "AESMSI"]):
         payload["ensemble"] = run_ensemble_section(args, data)
-
-    if any(label in args.demos for label in ["C", "D", "E"]):
+    if any(name in args.demos for name in ["MFSMLS", "MMFS", "CCAMFS"]):
         payload["multifidelity"] = run_multifidelity_section(args, data)
-
-    if "F" in args.demos:
+    if "DISO" in args.demos:
         payload["active_learning"] = run_active_learning_section(args, data)
-
-    if any(label in args.demos for label in ["I", "J"]):
+    if any(name in args.demos for name in ["MIGA", "CFARSSDA"]):
         payload["optimization"] = run_optimization_section(args, data)
 
     payload["summary"] = {
@@ -949,10 +853,17 @@ def main() -> None:
         "active_learning_runs": len(payload.get("active_learning", [])),
         "optimization_runs": len(payload.get("optimization", [])),
     }
+    return payload
 
-    maybe_visualize(args, payload)
-    save_path = save_results(args, payload)
-    logger.info(f"{hue.g}Engineering report saved to {save_path}{hue.q}")
+
+def main() -> None:
+    """
+    Execute the engineering case workflow from the command line.
+    """
+    args = case_config.get_args()
+    payload = run_case(args)
+    save_path = save_results(payload)
+    logger.info(f"{hue.g}Case report saved to {save_path}{hue.q}")
 
 
 if __name__ == "__main__":

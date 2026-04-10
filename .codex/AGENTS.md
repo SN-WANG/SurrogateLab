@@ -5,7 +5,7 @@
 - SurrogateLab is the benchmark and engineering-validation repository in the WSNet family.
 - The repository has two main execution paths:
   - analytic benchmarks: `bench_main.py -> bench_config.py -> bench_funcs.py`
-  - engineering validation: `abaqus_main.py -> abaqus_config.py -> AbaqusModel`
+  - engineering validation: `case_main.py -> case_config.py -> AbaqusModel`
 - The current engineering workflow is centered on two outputs only:
   - `weight`
   - `stress_skin`
@@ -15,7 +15,7 @@
 - Treat the current repository code as the source of truth when older notes, reports, or task documents disagree with it.
 - `bench_funcs.py` is the canonical registry for the current analytic benchmark functions and their names.
 - `bench_config.py` is the canonical place for current default analytic validation settings.
-- `abaqus_config.py` is the canonical place for current default engineering validation settings.
+- `case_config.py` is the canonical place for current default engineering validation settings.
 - The current local `AbaqusModel` is only a mock, but its public call contract must remain compatible with the real remote workflow: instantiate the model and call `run(input_arr)`.
 
 ## WSNet Relationship
@@ -41,7 +41,7 @@
 ## Current Default Validation Targets
 
 - Analytic ensemble defaults use a `10%` relative accuracy-gain target over the mean single-model baseline.
-- Analytic multi-fidelity defaults currently use an `87%` minimum accuracy threshold.
+- Analytic multi-fidelity defaults currently use a `90%` minimum accuracy threshold.
 - Analytic active-learning defaults use a `20%` relative accuracy-gain target.
 - Engineering ensemble defaults use a `10%` relative accuracy-gain target.
 - Engineering multi-fidelity defaults use a `90%` minimum accuracy threshold.
@@ -52,26 +52,42 @@
 
 ## Current Engineering Defaults
 
-- Default engineering training counts are tuned to make the contract-style engineering checks practical under the current mock model:
-  - `num_train = 12`
-  - `num_lf = 80`
-  - `num_hf = 30`
-  - `num_active_initial = 2`
-  - `num_infill = 10`
+- Default engineering sample counts follow the current contract-style case configuration:
+  - `num_train = 30`
+  - `num_test = 50`
+  - `num_lf = 30`
+  - `num_hf = 15`
+  - `num_active_initial = 3`
+  - `num_infill = 21`
 - The current engineering mock scales `weight` to an engineering-style range compatible with the `0.31` constraint while preserving the same public interface.
 - Only `weight` and `stress_skin` are first-class engineering validation targets right now; the other two mock outputs can remain present but are not the focus of default reporting.
+
+## Naming Defaults
+
+- Use the real external algorithm names directly in configs, logs, and result payloads:
+  - `TAHS`
+  - `AESMSI`
+  - `MFSMLS`
+  - `MMFS`
+  - `CCAMFS`
+  - `DISO`
+  - `MICO`
+  - `MOBO`
+  - `MIGA`
+  - `CFARSSDA`
+- Do not rely on `A/B/C/...` labels or other alias-heavy config parsing as the default workflow interface.
 
 ## Analytic Benchmark Notes
 
 - Keep the fixed benchmark-function identities unless the user explicitly asks to replace them.
 - The current analytic defaults are tuned around the existing E-AHF-style function set.
-- The `branin` multi-fidelity case is the limiting case for the current three multi-fidelity surrogate models, which is why the current default analytic MF threshold is not set to `90%`.
+- The `branin` multi-fidelity case remains the limiting case for the current three multi-fidelity surrogate models.
 
 ## Active Learning Notes
 
 - `sampling/so_infill.py` is treated as the WSNet-inherited baseline and should not be modified casually.
 - `sampling/diso_infill.py` is the SurrogateLab-local distance-informed extension for single-objective active learning.
-- `DISOInfill` is the preferred single-objective active-learning class in current SurrogateLab workflows.
+- `DISO` is the preferred outward label for single-objective active learning, implemented by `DISOInfill` internally.
 
 ## Practical Change Strategy
 
@@ -79,6 +95,7 @@
 - Keep benchmark and engineering defaults easy to audit from the config files.
 - When changing thresholds or sample counts, preserve the benchmark-function identities and the engineering output focus unless the user explicitly asks otherwise.
 - When changing the Abaqus mock, protect the call interface first and the exact local numeric scaling second.
+- Default outputs are written directly to the repository root as `bench_results.json` for analytic runs and `case_doe_cache.npy` / `case_results.json` for engineering runs.
 
 ## Non-Goals
 

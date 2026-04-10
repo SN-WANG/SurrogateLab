@@ -2,11 +2,11 @@
 # Author: Shengning Wang
 
 from __future__ import annotations
-
 import json
 import os
 import random
-from typing import Any, Dict, List
+from statistics import mean
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 
@@ -30,6 +30,11 @@ from sampling.mf_infill import MultiFidelityInfill
 from sampling.mo_infill import MultiObjectiveInfill
 from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
+
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULT_FILE_NAME = "bench_results.json"
+RESULT_FILE_PATH = os.path.join(PROJECT_DIR, RESULT_FILE_NAME)
 
 
 def scale_to_bounds(x_norm: np.ndarray, bounds: np.ndarray) -> np.ndarray:
@@ -134,10 +139,7 @@ def evaluate_metrics(y_true: np.ndarray, y_pred: np.ndarray, eps: float) -> Dict
     Returns:
         Dict[str, float]: Metric dictionary.
     """
-    return {
-        "accuracy": evaluate_accuracy(y_true, y_pred, eps=eps),
-        "r2": evaluate_r2(y_true, y_pred, eps=eps),
-    }
+    return {"accuracy": evaluate_accuracy(y_true, y_pred, eps=eps), "r2": evaluate_r2(y_true, y_pred, eps=eps)}
 
 
 def compute_relative_gain(before: float, after: float, eps: float) -> float:
@@ -170,6 +172,23 @@ def fit_krg(x_train: np.ndarray, y_train: np.ndarray, args: Any) -> KRG:
     model = KRG(**args.krg_params)
     model.fit(x_train, y_train)
     return model
+
+
+def build_mfs_mls_model(args: Any) -> MFSMLS:
+    """
+    Build the MFS-MLS model with the current workspace signature.
+
+    Args:
+        args (Any): Parsed arguments.
+
+    Returns:
+        MFSMLS: Configured MFS-MLS model.
+    """
+    return MFSMLS(
+        poly_degree=1,
+        neighbor_factor=args.mfs_mls_neighbor_factor,
+        ridge=args.mfs_mls_ridge,
+    )
 
 
 def compute_pareto_size(y_values: np.ndarray) -> int:
@@ -223,15 +242,15 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: Per-case benchmark records.
     """
-    single_model_builders = {
+    single_model_builders: Dict[str, Callable[[], Any]] = {
         "PRS": lambda: PRS(),
         "RBF": lambda: RBF(),
         "KRG": lambda: KRG(**args.krg_params),
         "SVR": lambda: SVR(),
     }
-    ensemble_builders = {
-        "A": ("TAHS", lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params)),
-        "B": ("AESMSI", lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params)),
+    ensemble_builders: Dict[str, Callable[[], Any]] = {
+        "TAHS": lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params),
+        "AESMSI": lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params),
     }
 
     results: List[Dict[str, Any]] = []
@@ -241,8 +260,8 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
         reset_random_state(args.seed)
         spec = bench_funcs.get_scalar_benchmark(case_name)
         config = bench_config.DEFAULT_ENSEMBLE_CASES[case_name]
-        bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+        bounds = spec.bounds_array
 
         x_train = sample_lhs(bounds, config["num_train"], lhs_iterations)
         x_test = sample_lhs(bounds, config["num_test"], lhs_iterations)
@@ -255,7 +274,7 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
             model.fit(x_train, y_train)
             baseline_scores[model_name] = evaluate_metrics(y_test, predict_mean(model, x_test), eps=args.metric_eps)
 
-        mean_single_accuracy = float(np.mean([item["accuracy"] for item in baseline_scores.values()]))
+        mean_single_accuracy = float(mean(item["accuracy"] for item in baseline_scores.values()))
         case_result = {
             "case": case_name,
             "input_dim": spec.input_dim,
@@ -267,8 +286,8 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
         }
         logger.info(f"  {spec.name}: baseline acc={hue.c}{mean_single_accuracy:.2f}%{hue.q}")
 
-        for demo_label, (algo_name, builder) in ensemble_builders.items():
-            if demo_label not in args.demos:
+        for algo_name, builder in ensemble_builders.items():
+            if algo_name not in args.demos:
                 continue
 
             model = builder()
@@ -276,15 +295,10 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
             metrics = evaluate_metrics(y_test, predict_mean(model, x_test), eps=args.metric_eps)
             gain = compute_relative_gain(mean_single_accuracy, metrics["accuracy"], eps=args.metric_eps)
             passed = gain >= args.ensemble_min_relative_gain
-            case_result["algorithms"][algo_name] = {
-                **metrics,
-                "accuracy_gain": gain,
-                "passed": passed,
-            }
-            status = "PASS" if passed else "FAIL"
+            case_result["algorithms"][algo_name] = {**metrics, "accuracy_gain": gain, "passed": passed}
             logger.info(
                 f"    {algo_name} | acc={metrics['accuracy']:.2f}% | r2={metrics['r2']:.4f} | "
-                f"gain={100.0 * gain:.2f}% -> {status}"
+                f"gain={100.0 * gain:.2f}% -> {'PASS' if passed else 'FAIL'}"
             )
 
         results.append(case_result)
@@ -302,10 +316,10 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: Per-case benchmark records.
     """
-    model_builders = {
-        "C": ("MFSMLS", lambda: MFSMLS(poly_degree=2)),
-        "D": ("MMFS", lambda: MMFS()),
-        "E": ("CCAMFS", lambda: CCAMFS()),
+    model_builders: Dict[str, Callable[[], Any]] = {
+        "MFSMLS": lambda: build_mfs_mls_model(args),
+        "MMFS": lambda: MMFS(),
+        "CCAMFS": lambda: CCAMFS(),
     }
 
     results: List[Dict[str, Any]] = []
@@ -315,8 +329,8 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
         reset_random_state(args.seed)
         spec = bench_funcs.get_multifidelity_benchmark(case_name)
         config = bench_config.DEFAULT_MULTIFIDELITY_CASES[case_name]
-        bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+        bounds = spec.bounds_array
 
         x_lf = sample_lhs(bounds, config["num_lf"], lhs_iterations)
         x_hf = sample_lhs(bounds, config["num_hf"], lhs_iterations)
@@ -335,21 +349,18 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
         }
         logger.info(f"  {spec.name}: target acc>={args.mf_min_accuracy:.2f}%")
 
-        for demo_label, (algo_name, builder) in model_builders.items():
-            if demo_label not in args.demos:
+        for algo_name, builder in model_builders.items():
+            if algo_name not in args.demos:
                 continue
 
             model = builder()
             model.fit(x_lf, y_lf, x_hf, y_hf)
             metrics = evaluate_metrics(y_test, predict_mean(model, x_test), eps=args.metric_eps)
             passed = metrics["accuracy"] >= args.mf_min_accuracy
-            case_result["algorithms"][algo_name] = {
-                **metrics,
-                "passed": passed,
-            }
-            status = "PASS" if passed else "FAIL"
+            case_result["algorithms"][algo_name] = {**metrics, "passed": passed}
             logger.info(
-                f"    {algo_name} | acc={metrics['accuracy']:.2f}% | r2={metrics['r2']:.4f} -> {status}"
+                f"    {algo_name} | acc={metrics['accuracy']:.2f}% | r2={metrics['r2']:.4f} -> "
+                f"{'PASS' if passed else 'FAIL'}"
             )
 
         results.append(case_result)
@@ -370,8 +381,8 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
     config = bench_config.DEFAULT_SINGLE_OBJECTIVE_ACTIVE_CASE
     reset_random_state(args.seed)
     spec = bench_funcs.get_scalar_benchmark(config["name"])
-    bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+    bounds = spec.bounds_array
 
     x_current = sample_lhs(bounds, config["num_initial"], lhs_iterations)
     x_test = sample_lhs(bounds, config["num_test"], lhs_iterations)
@@ -404,9 +415,8 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
     model_after = fit_krg(x_current, y_current, args)
     metrics_after = evaluate_metrics(y_test, predict_mean(model_after, x_test), eps=args.metric_eps)
     gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
-    passed = gain >= args.active_learning_min_relative_gain
 
-    logger.info(f"{hue.b}Demo F: DISO Active Learning{hue.q}")
+    logger.info(f"{hue.b}Single-Objective Active Learning{hue.q}")
     logger.info(
         f"  {spec.name} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
         f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}%"
@@ -414,6 +424,7 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
 
     return {
         "case": spec.name,
+        "algorithm": "DISO",
         "num_initial": config["num_initial"],
         "num_test": config["num_test"],
         "num_infill": config["num_infill"],
@@ -422,7 +433,7 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
         "after": metrics_after,
         "accuracy_gain": gain,
         "history_best": history_best,
-        "passed": passed,
+        "passed": gain >= args.active_learning_min_relative_gain,
     }
 
 
@@ -439,8 +450,8 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
     config = bench_config.DEFAULT_MULTI_FIDELITY_ACTIVE_CASE
     reset_random_state(args.seed)
     spec = bench_funcs.get_multifidelity_benchmark(config["name"])
-    bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+    bounds = spec.bounds_array
 
     x_lf = sample_lhs(bounds, config["num_lf"], lhs_iterations)
     x_test = sample_lhs(bounds, config["num_test"], lhs_iterations)
@@ -473,9 +484,8 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
     model_after = fit_krg(x_current, y_current, args)
     metrics_after = evaluate_metrics(y_test, predict_mean(model_after, x_test), eps=args.metric_eps)
     gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
-    passed = gain >= args.active_learning_min_relative_gain
 
-    logger.info(f"{hue.b}Demo G: Multi-Fidelity Active Learning{hue.q}")
+    logger.info(f"{hue.b}Multi-Fidelity Active Learning{hue.q}")
     logger.info(
         f"  {spec.name} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
         f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}%"
@@ -483,6 +493,7 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
 
     return {
         "case": spec.name,
+        "algorithm": "MICO",
         "num_hf_initial": config["num_hf_initial"],
         "num_lf": config["num_lf"],
         "num_test": config["num_test"],
@@ -492,7 +503,7 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
         "after": metrics_after,
         "accuracy_gain": gain,
         "history_best": history_best,
-        "passed": passed,
+        "passed": gain >= args.active_learning_min_relative_gain,
     }
 
 
@@ -509,8 +520,8 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
     config = bench_config.DEFAULT_MULTI_OBJECTIVE_ACTIVE_CASE
     reset_random_state(args.seed)
     spec = bench_funcs.get_multiobjective_benchmark(config["name"])
-    bounds = spec.bounds_array
     lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+    bounds = spec.bounds_array
 
     x_current = sample_lhs(bounds, config["num_initial"], lhs_iterations)
     x_test = sample_lhs(bounds, config["num_test"], lhs_iterations)
@@ -544,9 +555,8 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
     metrics_after = evaluate_metrics(y_test, predict_mean(model_after, x_test), eps=args.metric_eps)
     pareto_after = compute_pareto_size(y_current)
     gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
-    passed = gain >= args.active_learning_min_relative_gain
 
-    logger.info(f"{hue.b}Demo H: Multi-Objective Active Learning{hue.q}")
+    logger.info(f"{hue.b}Multi-Objective Active Learning{hue.q}")
     logger.info(
         f"  {spec.name} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
         f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}%"
@@ -554,6 +564,7 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
 
     return {
         "case": spec.name,
+        "algorithm": "MOBO",
         "num_initial": config["num_initial"],
         "num_test": config["num_test"],
         "num_infill": config["num_infill"],
@@ -566,7 +577,7 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
         "accuracy_gain": gain,
         "pareto_size_before": pareto_before,
         "pareto_size_after": pareto_after,
-        "passed": passed,
+        "passed": gain >= args.active_learning_min_relative_gain,
     }
 
 
@@ -587,16 +598,16 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
         reset_random_state(args.seed)
         spec = bench_funcs.get_scalar_benchmark(case_name)
         config = bench_config.DEFAULT_OPTIMIZATION_CASES[case_name]
-        bounds = spec.bounds_array
         lhs_iterations = config.get("lhs_iterations", args.lhs_iterations)
+        bounds = spec.bounds_array
 
         x_train = sample_lhs(bounds, config["num_train"], lhs_iterations)
         y_train = spec.evaluate(x_train)
         surrogate = fit_krg(x_train, y_train, args)
 
         def objective(x_vec: np.ndarray) -> float:
-            mean, _ = surrogate.predict(np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
-            return float(mean[0, 0])
+            mean_value, _ = surrogate.predict(np.asarray(x_vec, dtype=np.float64).reshape(1, -1))
+            return float(mean_value[0, 0])
 
         case_result: Dict[str, Any] = {
             "case": case_name,
@@ -605,7 +616,7 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
             "algorithms": {},
         }
 
-        if "I" in args.demos:
+        if "MIGA" in args.demos:
             result = multi_island_genetic_optimize(
                 func=objective,
                 bounds=[tuple(bound) for bound in bounds],
@@ -624,7 +635,7 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
             }
             logger.info(f"  {spec.name} / MIGA | pred={result.fun:.6f} | verified={verified:.6f}")
 
-        if "J" in args.demos:
+        if "CFARSSDA" in args.demos:
             result = dragonfly_optimize(
                 func=objective,
                 bounds=[tuple(bound) for bound in bounds],
@@ -635,50 +646,37 @@ def run_optimization_section(args: Any) -> List[Dict[str, Any]]:
             )
             verified = float(spec.evaluate(result.x.reshape(1, -1))[0, 0])
             optimum_gap = None if spec.known_optimum is None else abs(verified - spec.known_optimum)
-            case_result["algorithms"]["CFSSDA"] = {
+            case_result["algorithms"]["CFARSSDA"] = {
                 "x_best": result.x,
                 "predicted_value": float(result.fun),
                 "verified_value": verified,
                 "optimum_gap": optimum_gap,
             }
-            logger.info(f"  {spec.name} / CFSSDA | pred={result.fun:.6f} | verified={verified:.6f}")
+            logger.info(f"  {spec.name} / CFARSSDA | pred={result.fun:.6f} | verified={verified:.6f}")
 
         results.append(case_result)
 
     return results
 
 
-def save_results(args: Any, payload: Dict[str, Any]) -> str:
+def run_bench_once(args: Any, seed: int) -> Dict[str, Any]:
     """
-    Save the benchmark payload as JSON.
+    Run one analytic benchmark pass for a fixed seed.
 
     Args:
         args (Any): Parsed arguments.
-        payload (Dict[str, Any]): Benchmark payload.
+        seed (int): Random seed.
 
     Returns:
-        str: Absolute save path.
+        Dict[str, Any]: Per-seed benchmark payload.
     """
-    os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.abspath(os.path.join(args.save_dir, "benchmark_results.json"))
-    with open(save_path, "w", encoding="utf-8") as file:
-        json.dump(to_serializable(payload), file, indent=2)
-    return save_path
-
-
-def main() -> None:
-    """
-    Execute the full analytic benchmark workflow.
-    """
-    args = bench_config.get_args()
-    seed_everything(args.seed)
-
-    logger.info(f"{hue.b}SurrogateLab Analytic Benchmarks{hue.q}")
-    logger.info(f"  demos    : {args.demos}")
-    logger.info(f"  save_dir : {args.save_dir}")
+    args.seed = seed
+    seed_everything(seed)
+    reset_random_state(seed)
 
     payload: Dict[str, Any] = {
-        "seed": args.seed,
+        "seed_mode": "single_seed",
+        "seed": seed,
         "demos": args.demos,
         "thresholds": {
             "ensemble_min_relative_gain": args.ensemble_min_relative_gain,
@@ -687,25 +685,255 @@ def main() -> None:
         },
     }
 
-    if any(label in args.demos for label in ["A", "B"]):
+    if any(name in args.demos for name in ("TAHS", "AESMSI")):
         payload["ensemble"] = run_ensemble_section(args)
 
-    if any(label in args.demos for label in ["C", "D", "E"]):
+    if any(name in args.demos for name in ("MFSMLS", "MMFS", "CCAMFS")):
         payload["multifidelity"] = run_multifidelity_section(args)
 
-    if "F" in args.demos:
+    if "DISO" in args.demos:
         payload["single_objective_active_learning"] = run_single_objective_active_case(args)
 
-    if "G" in args.demos:
+    if "MICO" in args.demos:
         payload["multi_fidelity_active_learning"] = run_multi_fidelity_active_case(args)
 
-    if "H" in args.demos:
+    if "MOBO" in args.demos:
         payload["multi_objective_active_learning"] = run_multi_objective_active_case(args)
 
-    if any(label in args.demos for label in ["I", "J"]):
+    if any(name in args.demos for name in ("MIGA", "CFARSSDA")):
         payload["optimization"] = run_optimization_section(args)
 
-    save_path = save_results(args, payload)
+    return payload
+
+
+def aggregate_ensemble_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Aggregate ensemble benchmark payloads across multiple seeds.
+
+    Args:
+        runs (List[Dict[str, Any]]): Per-seed payloads.
+
+    Returns:
+        List[Dict[str, Any]]: Averaged ensemble summary.
+    """
+    if not runs or "ensemble" not in runs[0]:
+        return []
+
+    threshold = runs[0]["thresholds"]["ensemble_min_relative_gain"]
+    summary: List[Dict[str, Any]] = []
+
+    for case_idx, case in enumerate(runs[0]["ensemble"]):
+        item = {
+            "case": case["case"],
+            "target_improvement": threshold,
+            "mean_single_accuracy": float(mean(run["ensemble"][case_idx]["mean_single_accuracy"] for run in runs)),
+            "algorithms": [],
+        }
+        for algo_name in case["algorithms"].keys():
+            entries = [run["ensemble"][case_idx]["algorithms"][algo_name] for run in runs]
+            avg_improvement = float(mean(entry["accuracy_gain"] for entry in entries))
+            item["algorithms"].append(
+                {
+                    "name": algo_name,
+                    "accuracy": float(mean(entry["accuracy"] for entry in entries)),
+                    "r2": float(mean(entry["r2"] for entry in entries)),
+                    "improvement": avg_improvement,
+                    "passed": avg_improvement >= threshold,
+                }
+            )
+        summary.append(item)
+
+    return summary
+
+
+def aggregate_multifidelity_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Aggregate multi-fidelity benchmark payloads across multiple seeds.
+
+    Args:
+        runs (List[Dict[str, Any]]): Per-seed payloads.
+
+    Returns:
+        List[Dict[str, Any]]: Averaged multi-fidelity summary.
+    """
+    if not runs or "multifidelity" not in runs[0]:
+        return []
+
+    threshold = runs[0]["thresholds"]["mf_min_accuracy"]
+    summary: List[Dict[str, Any]] = []
+
+    for case_idx, case in enumerate(runs[0]["multifidelity"]):
+        item = {"case": case["case"], "target_accuracy": threshold, "algorithms": []}
+        for algo_name in case["algorithms"].keys():
+            entries = [run["multifidelity"][case_idx]["algorithms"][algo_name] for run in runs]
+            avg_accuracy = float(mean(entry["accuracy"] for entry in entries))
+            item["algorithms"].append(
+                {
+                    "name": algo_name,
+                    "accuracy": avg_accuracy,
+                    "r2": float(mean(entry["r2"] for entry in entries)),
+                    "passed": avg_accuracy >= threshold,
+                }
+            )
+        summary.append(item)
+
+    return summary
+
+
+def aggregate_active_learning_runs(runs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Aggregate active-learning payloads across multiple seeds.
+
+    Args:
+        runs (List[Dict[str, Any]]): Per-seed payloads.
+
+    Returns:
+        Dict[str, Dict[str, Any]]: Averaged active-learning summary.
+    """
+    if not runs:
+        return {}
+
+    threshold = runs[0]["thresholds"]["active_learning_min_relative_gain"]
+    mapping = {
+        "single_objective": ("single_objective_active_learning", "Single-Objective Active Learning"),
+        "multi_fidelity": ("multi_fidelity_active_learning", "Multi-Fidelity Active Learning"),
+        "multi_objective": ("multi_objective_active_learning", "Multi-Objective Active Learning"),
+    }
+    summary: Dict[str, Dict[str, Any]] = {}
+
+    for key, (payload_key, title) in mapping.items():
+        entries = [run[payload_key] for run in runs if payload_key in run]
+        if not entries:
+            continue
+        summary[key] = {
+            "title": title,
+            "case": entries[0]["case"],
+            "target_improvement": threshold,
+            "before_accuracy": float(mean(entry["before"]["accuracy"] for entry in entries)),
+            "after_accuracy": float(mean(entry["after"]["accuracy"] for entry in entries)),
+            "before_r2": float(mean(entry["before"]["r2"] for entry in entries)),
+            "after_r2": float(mean(entry["after"]["r2"] for entry in entries)),
+            "improvement": float(mean(entry["accuracy_gain"] for entry in entries)),
+            "passed": float(mean(entry["accuracy_gain"] for entry in entries)) >= threshold,
+        }
+
+    return summary
+
+
+def aggregate_optimization_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Aggregate optimization payloads across multiple seeds.
+
+    Args:
+        runs (List[Dict[str, Any]]): Per-seed payloads.
+
+    Returns:
+        List[Dict[str, Any]]: Averaged optimization summary.
+    """
+    if not runs or "optimization" not in runs[0]:
+        return []
+
+    summary: List[Dict[str, Any]] = []
+    template_cases = runs[0]["optimization"]
+
+    for case_idx, case in enumerate(template_cases):
+        for algo_name in case["algorithms"].keys():
+            entries = [
+                run["optimization"][case_idx]["algorithms"].get(algo_name)
+                for run in runs
+                if len(run.get("optimization", [])) > case_idx and algo_name in run["optimization"][case_idx]["algorithms"]
+            ]
+            if not entries:
+                continue
+            optimum_gap_values = [entry["optimum_gap"] for entry in entries if entry["optimum_gap"] is not None]
+            summary.append(
+                {
+                    "case": case["case"],
+                    "name": algo_name,
+                    "success": len(entries) == len(runs),
+                    "predicted_value": float(mean(entry["predicted_value"] for entry in entries)),
+                    "verified_value": float(mean(entry["verified_value"] for entry in entries)),
+                    "optimum_gap": float(mean(optimum_gap_values)) if optimum_gap_values else None,
+                }
+            )
+
+    return summary
+
+
+def build_average_summary(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build the averaged summary for a multi-seed benchmark run.
+
+    Args:
+        runs (List[Dict[str, Any]]): Per-seed benchmark payloads.
+
+    Returns:
+        Dict[str, Any]: Averaged benchmark summary.
+    """
+    return {
+        "seed_mode": "multi_seed",
+        "seeds": [run["seed"] for run in runs],
+        "num_runs": len(runs),
+        "demos": runs[0]["demos"],
+        "thresholds": runs[0]["thresholds"],
+        "ensemble": aggregate_ensemble_runs(runs),
+        "multifidelity": aggregate_multifidelity_runs(runs),
+        "active_learning": aggregate_active_learning_runs(runs),
+        "optimization": aggregate_optimization_runs(runs),
+    }
+
+
+def run_bench_suite(args: Any) -> Dict[str, Any]:
+    """
+    Run the configured benchmark suite and return the final payload.
+
+    Args:
+        args (Any): Parsed arguments.
+
+    Returns:
+        Dict[str, Any]: Final benchmark payload.
+    """
+    if args.seed_mode == "single_seed":
+        return run_bench_once(args, args.seed)
+
+    runs = [run_bench_once(args, seed) for seed in args.seeds]
+    return {
+        "seed_mode": "multi_seed",
+        "seeds": args.seeds,
+        "raw_runs": runs,
+        "average": build_average_summary(runs),
+    }
+
+
+def save_results(payload: Dict[str, Any]) -> str:
+    """
+    Save the benchmark payload as JSON.
+
+    Args:
+        payload (Dict[str, Any]): Benchmark payload.
+
+    Returns:
+        str: Absolute save path.
+    """
+    with open(RESULT_FILE_PATH, "w", encoding="utf-8") as file:
+        json.dump(to_serializable(payload), file, indent=2)
+    return RESULT_FILE_PATH
+
+
+def main() -> None:
+    """
+    Execute the analytic benchmark workflow.
+    """
+    args = bench_config.get_args()
+
+    logger.info(f"{hue.b}SurrogateLab Analytic Benchmarks{hue.q}")
+    logger.info(f"  seed_mode : {args.seed_mode}")
+    logger.info(f"  seed      : {args.seed}")
+    logger.info(f"  seeds     : {args.seeds}")
+    logger.info(f"  demos     : {args.demos}")
+
+    payload = run_bench_suite(args)
+    save_path = save_results(payload)
     logger.info(f"{hue.g}Benchmark report saved to {save_path}{hue.q}")
 
 

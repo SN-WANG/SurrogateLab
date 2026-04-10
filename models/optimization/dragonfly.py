@@ -1,4 +1,4 @@
-# CFSSDA Dragonfly Optimizer
+# CFARSSDA Dragonfly Optimizer
 # Author: Shengning Wang
 
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
@@ -48,6 +48,56 @@ def _levy_flight(num_vars: int, beta: float, rng: np.random.Generator) -> np.nda
     return 0.01 * u / (np.abs(v) ** (1.0 / beta) + 1e-12)
 
 
+def _compute_air_density(
+    candidate: np.ndarray,
+    lower: np.ndarray,
+    span: np.ndarray,
+    sea_level_density: float,
+    temperature_ratio_floor: float,
+) -> float:
+    """
+    Estimate the local air density proxy from a candidate position.
+
+    Args:
+        candidate (np.ndarray): Candidate position with shape (num_vars,).
+        lower (np.ndarray): Lower bounds with shape (num_vars,).
+        span (np.ndarray): Variable span with shape (num_vars,).
+        sea_level_density (float): Reference sea-level air density.
+        temperature_ratio_floor (float): Lower bound for the temperature ratio proxy.
+
+    Returns:
+        float: Air density proxy.
+    """
+    normalized_altitude = np.clip(np.mean((candidate - lower) / (span + 1e-12)), 0.0, 1.0)
+    temperature_ratio = 1.0 - (1.0 - temperature_ratio_floor) * normalized_altitude
+    return float(sea_level_density * max(temperature_ratio, 1e-6))
+
+
+def _compute_block_area(
+    mass_value: float,
+    mass_scale: float,
+    area_min: float,
+    area_max: float,
+    area_shape: float,
+) -> float:
+    """
+    Map a mass value to an adaptive blocking area.
+
+    Args:
+        mass_value (float): Current mass-like value.
+        mass_scale (float): Population scale reference.
+        area_min (float): Lower asymptote of the blocking area.
+        area_max (float): Upper asymptote of the blocking area.
+        area_shape (float): Logistic shape factor.
+
+    Returns:
+        float: Adaptive blocking area.
+    """
+    ratio = np.clip(mass_value / max(mass_scale, 1e-12), 0.0, 1.0)
+    logistic = 1.0 / (1.0 + np.exp(-area_shape * (ratio - 0.5)))
+    return float(area_min + (area_max - area_min) * logistic)
+
+
 def _compute_coulomb_force(
     population: np.ndarray,
     index: int,
@@ -81,11 +131,11 @@ def _compute_coulomb_force(
             continue
         diff = population[other_index] - population[index]
         dist = np.linalg.norm(diff) + 1e-12
-        force += rng.random() * k_t * masses[index] * masses[other_index] * diff / dist
+        force += rng.random() * k_t * masses[index] * masses[other_index] * diff / (dist**2)
 
     enemy_diff = enemy_pos - population[index]
     enemy_dist = np.linalg.norm(enemy_diff) + 1e-12
-    force -= rng.random() * k_t * masses[index] * enemy_mass * enemy_diff / enemy_dist
+    force -= rng.random() * k_t * masses[index] * enemy_mass * enemy_diff / (enemy_dist**2)
     return force
 
 
@@ -103,7 +153,18 @@ def _update_population(
     behavior: float,
     k_t: float,
     levy_beta: float,
+    lower: np.ndarray,
     span: np.ndarray,
+    drag_coefficient: float,
+    sea_level_density: float,
+    temperature_ratio_floor: float,
+    area_min: float,
+    area_max: float,
+    area_shape: float,
+    stamina: float,
+    cohesion_floor: float,
+    food_weight: float,
+    enemy_weight: float,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -123,7 +184,18 @@ def _update_population(
         behavior (float): Social behavior coefficient.
         k_t (float): Iteration-dependent Coulomb coefficient.
         levy_beta (float): Levy-flight exponent.
+        lower (np.ndarray): Lower bounds with shape (num_vars,).
         span (np.ndarray): Variable ranges with shape (num_vars,) and dtype float64.
+        drag_coefficient (float): Air drag coefficient.
+        sea_level_density (float): Reference sea-level air density.
+        temperature_ratio_floor (float): Lower bound for the temperature ratio proxy.
+        area_min (float): Lower asymptote of the blocking area.
+        area_max (float): Upper asymptote of the blocking area.
+        area_shape (float): Logistic shape factor.
+        stamina (float): Flight stamina.
+        cohesion_floor (float): Lower bound for the cohesion scaling.
+        food_weight (float): Food attraction weight.
+        enemy_weight (float): Enemy repulsion weight.
         rng (np.random.Generator): Random number generator.
 
     Returns:
@@ -135,15 +207,37 @@ def _update_population(
     max_step = 0.2 * span
     new_population = population.copy()
     new_delta_x = delta_x.copy()
+    max_fit_g = float(np.max(fit_g))
 
     for i in range(num_points):
         distances = np.linalg.norm(population - population[i], axis=1)
         neighbors = np.where((distances > 0.0) & (distances <= neighbor_radius))[0]
 
+        air_density = _compute_air_density(
+            candidate=population[i],
+            lower=lower,
+            span=span,
+            sea_level_density=sea_level_density,
+            temperature_ratio_floor=temperature_ratio_floor,
+        )
+        block_area = _compute_block_area(
+            mass_value=fit_g[i],
+            mass_scale=max_fit_g,
+            area_min=area_min,
+            area_max=area_max,
+            area_shape=area_shape,
+        )
+        speed = float(np.linalg.norm(delta_x[i]))
+        drag_force = -0.5 * drag_coefficient * air_density * block_area * speed * delta_x[i]
+        drag_acceleration = drag_force / (fit_g[i] + 1e-12)
+        cohesion_scale = max(cohesion_floor, 1.0 - block_area / max(area_max, 1e-12))
+
         if neighbors.size == 0:
             levy_step = _levy_flight(num_vars, levy_beta, rng) * np.maximum(np.abs(population[i]), 1.0)
-            new_delta_x[i] = levy_step
-            new_population[i] = population[i] + levy_step
+            step = stamina * levy_step + drag_acceleration
+            step = np.clip(step, -max_step, max_step)
+            new_delta_x[i] = step
+            new_population[i] = population[i] + step
             continue
 
         separation = -np.sum(population[i] - population[neighbors], axis=0)
@@ -168,11 +262,13 @@ def _update_population(
             inertia * delta_x[i]
             + behavior * rng.random() * separation
             + behavior * rng.random() * alignment
-            + behavior * rng.random() * cohesion
-            + 2.0 * rng.random() * food_attraction
-            + behavior * rng.random() * enemy_avoidance
+            + cohesion_scale * behavior * rng.random() * cohesion
+            + food_weight * rng.random() * food_attraction
+            + enemy_weight * behavior * rng.random() * enemy_avoidance
             + acceleration
+            + drag_acceleration
         )
+        step *= stamina
         step = np.clip(step, -max_step, max_step)
         new_delta_x[i] = step
         new_population[i] = population[i] + step
@@ -207,13 +303,24 @@ def dragonfly_optimize(
     coulomb_alpha_std: float = 0.25,
     k0: float = 1.0,
     levy_beta: float = 1.5,
+    drag_coefficient: float = 0.5,
+    sea_level_density: float = 1.225,
+    temperature_ratio_floor: float = 0.85,
+    area_min: float = 0.2,
+    area_max: float = 1.0,
+    area_shape: float = 6.0,
+    stamina_decay: float = 3.0,
+    stamina_floor: float = 0.25,
+    cohesion_floor: float = 0.3,
+    food_weight: float = 2.0,
+    enemy_weight: float = 1.0,
 ) -> OptimizeResult:
     """
-    Optimize a continuous objective with the Coulomb-force-search dragonfly algorithm.
+    Optimize a continuous objective with the CFARSSDA dragonfly algorithm.
 
     Args:
-        func (Callable): Objective function that maps a candidate with shape (num_vars,) and dtype float64
-            to either a scalar or an objective vector with shape (num_objectives,) and dtype float64.
+        func (Callable): Objective function mapping a candidate with shape (num_vars,) to a scalar
+            or an objective vector with shape (num_objectives,).
         bounds (Union[Bounds, Sequence[Tuple[float, float]]]): Variable bounds for each dimension.
         args (Tuple[Any, ...]): Extra objective arguments.
         maxiter (int): Maximum iterations.
@@ -222,9 +329,9 @@ def dragonfly_optimize(
         seed (Optional[Union[int, np.random.Generator]]): Random seed or generator.
         polish (bool): Whether to run local refinement at the end.
         constraints (Union[Sequence[Any], Any]): Constraints accepted by SciPy.
-        x0 (Optional[np.ndarray]): Initial guess with shape (num_vars,) and dtype float64.
+        x0 (Optional[np.ndarray]): Initial guess with shape (num_vars,).
         multi_objective (bool): Whether the objective is multi-objective.
-        objective_weights (Optional[np.ndarray]): Objective weights with shape (num_objectives,) and dtype float64.
+        objective_weights (Optional[np.ndarray]): Objective weights with shape (num_objectives,).
         scalarization (str): Scalarization method.
         return_pareto (bool): Whether to return Pareto points.
         penalty_start (float): Initial penalty factor.
@@ -239,6 +346,17 @@ def dragonfly_optimize(
         coulomb_alpha_std (float): Standard deviation of the decay factor.
         k0 (float): Initial Coulomb coefficient.
         levy_beta (float): Levy-flight exponent.
+        drag_coefficient (float): Air drag coefficient.
+        sea_level_density (float): Reference sea-level air density.
+        temperature_ratio_floor (float): Lower bound for the temperature ratio proxy.
+        area_min (float): Lower asymptote of the blocking area.
+        area_max (float): Upper asymptote of the blocking area.
+        area_shape (float): Logistic shape factor.
+        stamina_decay (float): Stamina decay rate.
+        stamina_floor (float): Stamina floor.
+        cohesion_floor (float): Lower bound for the cohesion scaling.
+        food_weight (float): Food attraction weight.
+        enemy_weight (float): Enemy repulsion weight.
 
     Returns:
         OptimizeResult: SciPy-style optimization result with population state and optional Pareto front.
@@ -259,6 +377,28 @@ def dragonfly_optimize(
         raise ValueError("penalty_growth must be >= 1.")
     if scalarization not in ["weighted_sum", "tchebycheff"]:
         raise ValueError("Unsupported scalarization method.")
+    if drag_coefficient < 0.0:
+        raise ValueError("drag_coefficient must be >= 0.")
+    if sea_level_density <= 0.0:
+        raise ValueError("sea_level_density must be > 0.")
+    if not (0.0 < temperature_ratio_floor <= 1.0):
+        raise ValueError("temperature_ratio_floor must be in (0, 1].")
+    if area_min <= 0.0:
+        raise ValueError("area_min must be > 0.")
+    if area_max < area_min:
+        raise ValueError("area_max must be >= area_min.")
+    if area_shape <= 0.0:
+        raise ValueError("area_shape must be > 0.")
+    if stamina_decay < 0.0:
+        raise ValueError("stamina_decay must be >= 0.")
+    if not (0.0 < stamina_floor <= 1.0):
+        raise ValueError("stamina_floor must be in (0, 1].")
+    if not (0.0 < cohesion_floor <= 1.0):
+        raise ValueError("cohesion_floor must be in (0, 1].")
+    if food_weight <= 0.0:
+        raise ValueError("food_weight must be > 0.")
+    if enemy_weight <= 0.0:
+        raise ValueError("enemy_weight must be > 0.")
 
     rng = _make_rng(seed)
 
@@ -305,6 +445,7 @@ def dragonfly_optimize(
         inertia = inertia_start + (inertia_end - inertia_start) * ratio
         behavior = c_max + (c_min - c_max) * ratio
         neighbor_radius = neighbor_radius_start + (neighbor_radius_end - neighbor_radius_start) * ratio
+        stamina = stamina_floor + (1.0 - stamina_floor) * np.exp(-stamina_decay * ratio)
 
         curr_best = float(np.min(energies))
         curr_worst = float(np.max(energies))
@@ -341,7 +482,18 @@ def dragonfly_optimize(
             behavior=behavior,
             k_t=k_t,
             levy_beta=levy_beta,
+            lower=lower,
             span=span,
+            drag_coefficient=drag_coefficient,
+            sea_level_density=sea_level_density,
+            temperature_ratio_floor=temperature_ratio_floor,
+            area_min=area_min,
+            area_max=area_max,
+            area_shape=area_shape,
+            stamina=stamina,
+            cohesion_floor=cohesion_floor,
+            food_weight=food_weight,
+            enemy_weight=enemy_weight,
             rng=rng,
         )
 
@@ -362,13 +514,12 @@ def dragonfly_optimize(
         penalty_factor *= penalty_growth
         new_energies = new_objective_scalars + penalty_factor * new_violations
 
-        improved = new_energies < energies
-        population[improved] = new_population[improved]
-        delta_x[improved] = new_delta_x[improved]
-        objective_vectors[improved] = new_objective_vectors[improved]
-        objective_scalars[improved] = new_objective_scalars[improved]
-        violations[improved] = new_violations[improved]
-        energies[improved] = new_energies[improved]
+        population = new_population
+        delta_x = new_delta_x
+        objective_vectors = new_objective_vectors
+        objective_scalars = new_objective_scalars
+        violations = new_violations
+        energies = new_energies
 
         if return_pareto and multi_objective:
             _append_archive(archive_x, archive_f, archive_v, population, objective_vectors, violations)
@@ -386,6 +537,7 @@ def dragonfly_optimize(
             break
 
     if polish:
+
         def local_objective(x_local: np.ndarray) -> float:
             values = np.atleast_1d(np.asarray(func(x_local, *args), dtype=np.float64)).reshape(-1)
             if values.size == 1:
@@ -435,7 +587,7 @@ def dragonfly_optimize(
     result.objective_vector = best_f.copy()
     result.constraint_violation = float(_constraint_violation(best_x, constraints, args))
     result.penalized_fun = best_energy
-    result.optimizer = "CFSSDA"
+    result.optimizer = "CFARSSDA"
 
     if multi_objective:
         result.fun_vector = best_f.copy()
