@@ -1,7 +1,6 @@
-# Benchmark configuration for SurrogateLab
+# Analytic benchmark configuration for SurrogateLab
 # Author: Shengning Wang
 
-from __future__ import annotations
 import argparse
 from collections import OrderedDict
 from typing import Dict, List

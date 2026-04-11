@@ -1,7 +1,6 @@
 # Analytic benchmark runner for SurrogateLab
 # Author: Shengning Wang
 
-from __future__ import annotations
 from functools import partial
 import json
 import os

@@ -1,7 +1,6 @@
 # Engineering case workflow configuration for SurrogateLab
 # Author: Shengning Wang
 
-from __future__ import annotations
 import argparse
 from collections import OrderedDict
 from typing import List

@@ -1,7 +1,6 @@
 # Benchmark function registry for SurrogateLab
 # Author: Shengning Wang
 
-from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 

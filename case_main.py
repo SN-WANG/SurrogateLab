@@ -1,12 +1,11 @@
 # Engineering case workflow for SurrogateLab
 # Author: Shengning Wang
 
-from __future__ import annotations
-from functools import partial
 import json
 import os
 import random
 import shutil
+from functools import partial
 from typing import Any, Dict, List
 
 import numpy as np
