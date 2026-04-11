@@ -1,0 +1,263 @@
+{
+  "demos": [
+    "TAHS",
+    "AESMSI",
+    "MFSMLS",
+    "MMFS",
+    "CCAMFS",
+    "DISO",
+    "MIGA",
+    "CFARSSDA"
+  ],
+  "targets": [
+    "weight",
+    "stress_skin"
+  ],
+  "runtime": {
+    "solver": "abaqus",
+    "interface_available": true,
+    "command_name": "abq2022",
+    "command_available": true,
+    "available": true,
+    "backend": "EXTERNAL_SOLVER"
+  },
+  "sample_counts": {
+    "num_train": 30,
+    "num_test": 50,
+    "num_lf": 30,
+    "num_hf": 15,
+    "num_active_initial": 2,
+    "num_infill": 21
+  },
+  "thresholds": {
+    "ensemble_min_relative_gain": 0.1,
+    "mf_min_accuracy": 90.0,
+    "active_learning_min_relative_gain": 0.2
+  },
+  "summary": {
+    "ensemble": {
+      "TAHS": "PASS",
+      "AESMSI": "PASS"
+    },
+    "multifidelity": {
+      "MFSMLS": "PASS",
+      "MMFS": "PASS",
+      "CCAMFS": "PASS"
+    },
+    "active_learning": {
+      "DISO": "FAIL"
+    },
+    "optimization": {
+      "MIGA": "PASS",
+      "CFARSSDA": "PASS"
+    }
+  },
+  "ensemble": [
+    {
+      "target": "weight",
+      "baseline_single_models": {
+        "PRS": {
+          "accuracy": 74.54778453698869,
+          "r2": -1.4637009110730506
+        },
+        "RBF": {
+          "accuracy": 98.93152265873549,
+          "r2": 0.995165013327939
+        },
+        "KRG": {
+          "accuracy": 99.99965471780469,
+          "r2": 0.9999999996555816
+        },
+        "SVR": {
+          "accuracy": 80.62221987255431,
+          "r2": -4.5100815835530383e-05
+        }
+      },
+      "mean_single_accuracy": 88.52529544652079,
+      "algorithms": {
+        "TAHS": {
+          "accuracy": 99.99965471780469,
+          "r2": 0.9999999996555816,
+          "accuracy_gain": 0.12961672947158592,
+          "passed": true
+        },
+        "AESMSI": {
+          "accuracy": 99.44534084277701,
+          "r2": 0.9976624366549058,
+          "accuracy_gain": 0.12335508558514963,
+          "passed": true
+        }
+      }
+    },
+    {
+      "target": "stress_skin",
+      "baseline_single_models": {
+        "PRS": {
+          "accuracy": 19.17569137762083,
+          "r2": -35.7345313288229
+        },
+        "RBF": {
+          "accuracy": 98.45370330293946,
+          "r2": 0.9846729712212083
+        },
+        "KRG": {
+          "accuracy": 98.58657794723857,
+          "r2": 0.9857251022055541
+        },
+        "SVR": {
+          "accuracy": 85.13357704498095,
+          "r2": -0.0002789929141366887
+        }
+      },
+      "mean_single_accuracy": 75.33738741819495,
+      "algorithms": {
+        "TAHS": {
+          "accuracy": 98.59709995313702,
+          "r2": 0.9857744648558543,
+          "accuracy_gain": 0.3087406310737628,
+          "passed": true
+        },
+        "AESMSI": {
+          "accuracy": 98.42800362500998,
+          "r2": 0.982221941101039,
+          "accuracy_gain": 0.30649611033947727,
+          "passed": true
+        }
+      }
+    }
+  ],
+  "multifidelity": [
+    {
+      "target": "weight",
+      "algorithms": {
+        "MFSMLS": {
+          "accuracy": 99.7756352467467,
+          "r2": 0.9997597946091531,
+          "passed": true
+        },
+        "MMFS": {
+          "accuracy": 99.92668686102199,
+          "r2": 0.999977915408094,
+          "passed": true
+        },
+        "CCAMFS": {
+          "accuracy": 97.3395941820587,
+          "r2": 0.9696258059814419,
+          "passed": true
+        }
+      }
+    },
+    {
+      "target": "stress_skin",
+      "algorithms": {
+        "MFSMLS": {
+          "accuracy": 92.22569059133407,
+          "r2": 0.6588221605875457,
+          "passed": true
+        },
+        "MMFS": {
+          "accuracy": 97.75664326000552,
+          "r2": 0.9769436935959516,
+          "passed": true
+        },
+        "CCAMFS": {
+          "accuracy": 93.65409842895973,
+          "r2": 0.8330531669387855,
+          "passed": true
+        }
+      }
+    }
+  ],
+  "active_learning": [
+    {
+      "target": "weight",
+      "algorithm": "DISO",
+      "criterion": "ei",
+      "num_initial": 2,
+      "num_infill": 21,
+      "before": {
+        "accuracy": 81.74330406821846,
+        "r2": 0.08041478157223392
+      },
+      "after": {
+        "accuracy": 99.99954428837312,
+        "r2": 0.9999999994092599
+      },
+      "accuracy_gain": 0.22333621607610818,
+      "history_best": [
+        1.148711,
+        1.148711,
+        1.148711,
+        1.148711,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205,
+        0.988205
+      ],
+      "passed": true
+    },
+    {
+      "target": "stress_skin",
+      "algorithm": "DISO",
+      "criterion": "ei",
+      "num_initial": 2,
+      "num_infill": 21,
+      "before": {
+        "accuracy": 84.16111367895238,
+        "r2": -0.02333610806361719
+      },
+      "after": {
+        "accuracy": 98.55096296914475,
+        "r2": 0.9846103459586352
+      },
+      "accuracy_gain": 0.1709797869962252,
+      "history_best": [
+        597.000122,
+        548.770752,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006,
+        501.587006
+      ],
+      "passed": false
+    }
+  ],
+  "optimization": [
+    {
+      "algorithm": "MIGA",
+      "passed": true
+    },
+    {
+      "algorithm": "CFARSSDA",
+      "passed": true
+    }
+  ]
+}
