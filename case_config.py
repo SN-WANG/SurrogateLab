@@ -58,7 +58,7 @@ SAMPLE_COUNTS = {
     "num_test": 50,
     "num_lf": 30,
     "num_hf": 15,
-    "num_active_initial": 3,
+    "num_active_initial": 1,
     "num_infill": 21,
 }
 

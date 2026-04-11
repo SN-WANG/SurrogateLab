@@ -37,14 +37,14 @@ MULTIFIDELITY_CASES = OrderedDict(
 ACTIVE_LEARNING_CASES = {
     "single_objective": {
         "name": "branin",
-        "num_initial": 2,
+        "num_initial": 1,
         "num_test": 200,
         "num_infill": 14,
         "criterion": "ei",
     },
     "multi_fidelity": {
         "name": "currin_exponential",
-        "num_hf_initial": 2,
+        "num_hf_initial": 1,
         "num_lf": 20,
         "num_test": 200,
         "num_infill": 14,
@@ -52,7 +52,7 @@ ACTIVE_LEARNING_CASES = {
     },
     "multi_objective": {
         "name": "vlmop2",
-        "num_initial": 2,
+        "num_initial": 1,
         "num_test": 200,
         "num_infill": 14,
         "num_samples": 3000,
