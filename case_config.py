@@ -58,7 +58,7 @@ SAMPLE_COUNTS = {
     "num_test": 50,
     "num_lf": 30,
     "num_hf": 15,
-    "num_active_initial": 2,
+    "num_active_initial": 3,
     "num_infill": 21,
 }
 
@@ -168,12 +168,12 @@ def get_args() -> argparse.Namespace:
     kriging = parser.add_argument_group("Kriging")
     kriging.add_argument("--krg_poly", type=str, default="constant", help="KRG regression basis.")
     kriging.add_argument("--krg_kernel", type=str, default="gaussian", help="KRG correlation kernel.")
-    kriging.add_argument("--krg_theta0", type=float, default=1.0, help="Initial KRG theta.")
+    kriging.add_argument("--krg_theta0", type=float, default=0.1, help="Initial KRG theta.")
     kriging.add_argument(
         "--krg_theta_bounds",
         type=float,
         nargs=2,
-        default=[1.0e-6, 100.0],
+        default=[1.0e-3, 10.0],
         help="Lower and upper bounds for KRG theta.",
     )
 
