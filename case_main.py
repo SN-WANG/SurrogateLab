@@ -36,14 +36,6 @@ from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
 
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-CASE_DOE_CACHE_NAME = "case_doe_cache.npy"
-CASE_RESULTS_NAME = "case_results.json"
-CASE_DOE_CACHE_PATH = os.path.join(PROJECT_DIR, CASE_DOE_CACHE_NAME)
-CASE_RESULTS_PATH = os.path.join(PROJECT_DIR, CASE_RESULTS_NAME)
-_CASE_RUNTIME: Dict[str, Any] | None = None
-
-
 # ============================================================
 # Runtime Backends
 # ============================================================
@@ -130,7 +122,7 @@ class _ExternalAbaqusModelAdapter:
             np.ndarray: Structural responses. (4,).
         """
         current_dir = os.getcwd()
-        os.chdir(PROJECT_DIR)
+        os.chdir(os.path.dirname(os.path.abspath(__file__)))
         try:
             return self.model.run(input_arr)
         finally:
@@ -150,9 +142,8 @@ def get_case_runtime() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Runtime status for solver selection and reporting.
     """
-    global _CASE_RUNTIME
-    if _CASE_RUNTIME is not None:
-        return _CASE_RUNTIME
+    if hasattr(get_case_runtime, "_cache"):
+        return get_case_runtime._cache
 
     command_name = _get_external_abaqus_command()
     interface_available = _ExternalAbaqusModel is not None
@@ -160,7 +151,7 @@ def get_case_runtime() -> Dict[str, Any]:
     available = interface_available and command_available
     backend = "EXTERNAL_SOLVER" if available else "LOCAL_PROXY"
 
-    _CASE_RUNTIME = {
+    get_case_runtime._cache = {
         "solver": "abaqus",
         "interface_available": interface_available,
         "command_name": command_name,
@@ -168,7 +159,7 @@ def get_case_runtime() -> Dict[str, Any]:
         "available": available,
         "backend": backend,
     }
-    return _CASE_RUNTIME
+    return get_case_runtime._cache
 
 
 get_abaqus_runtime = get_case_runtime
@@ -243,18 +234,27 @@ def scale_to_bounds(x_norm: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     return bounds[:, 0] + x_norm * (bounds[:, 1] - bounds[:, 0])
 
 
-def sample_lhs(bounds: np.ndarray, num_samples: int) -> np.ndarray:
+def sample_lhs(bounds: np.ndarray, num_samples: int, seed: int | None = None) -> np.ndarray:
     """
     Generate a latin hypercube inside the engineering design box.
 
     Args:
         bounds (np.ndarray): Box bounds. (D, 2).
         num_samples (int): Number of samples.
+        seed (int | None): Optional local RNG seed for reproducible DOE generation.
 
     Returns:
         np.ndarray: Physical samples. (N, D).
     """
-    x_norm = lhs_design(num_samples, bounds.shape[0])
+    if seed is None:
+        x_norm = lhs_design(num_samples, bounds.shape[0])
+    else:
+        state = np.random.get_state()
+        np.random.seed(seed)
+        try:
+            x_norm = lhs_design(num_samples, bounds.shape[0])
+        finally:
+            np.random.set_state(state)
     return scale_to_bounds(x_norm, bounds)
 
 
@@ -470,9 +470,8 @@ def build_cache_meta(args: Any, runtime: Dict[str, Any]) -> Dict[str, Any]:
         Dict[str, Any]: Cache metadata signature.
     """
     return {
-        "seed_mode": args.seed_mode,
-        "seed": args.seed,
         "backend": runtime["backend"],
+        "doe_seed": args.doe_seed,
         "num_features": args.num_features,
         "num_outputs": args.num_outputs,
         "bounds": args.bounds.tolist(),
@@ -495,33 +494,43 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
     """
     runtime = get_case_runtime()
     meta = build_cache_meta(args, runtime)
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "case_doe_cache.npy")
 
-    if os.path.isfile(CASE_DOE_CACHE_PATH):
-        cached = np.load(CASE_DOE_CACHE_PATH, allow_pickle=True).item()
+    if os.path.isfile(cache_path):
+        cached = np.load(cache_path, allow_pickle=True).item()
         if cached.get("meta") == meta:
-            logger.info(f"{hue.g}Load cached case DOE from {CASE_DOE_CACHE_PATH}{hue.q}")
+            logger.info(f"{hue.g}Load cached case DOE from {cache_path}{hue.q}")
             return cached
-        logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {CASE_DOE_CACHE_PATH}{hue.q}")
+        logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {cache_path}{hue.q}")
 
     logger.info(f"{hue.b}Generate case DOE data{hue.q}")
-    x_train = sample_lhs(args.bounds, args.num_train)
-    x_test = sample_lhs(args.bounds, args.num_test)
-    x_lf = sample_lhs(args.bounds, args.num_lf)
-    x_hf = sample_lhs(args.bounds, args.num_hf)
+    x_train = sample_lhs(args.bounds, args.num_train, seed=args.doe_seed)
+    x_test = sample_lhs(args.bounds, args.num_test, seed=args.doe_seed + 1)
+    x_lf = sample_lhs(args.bounds, args.num_lf, seed=args.doe_seed + 2)
+    x_hf = sample_lhs(args.bounds, args.num_hf, seed=args.doe_seed + 3)
 
-    data = {
-        "meta": meta,
-        "x_train": x_train,
-        "y_train": run_abaqus_batch(x_train, fidelity="high"),
-        "x_test": x_test,
-        "y_test": run_abaqus_batch(x_test, fidelity="high"),
-        "x_lf": x_lf,
-        "y_lf": run_abaqus_batch(x_lf, fidelity="low"),
-        "x_hf": x_hf,
-        "y_hf": run_abaqus_batch(x_hf, fidelity="high"),
-    }
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    try:
+        random.seed(args.doe_seed + 4)
+        np.random.seed(args.doe_seed + 4)
 
-    np.save(CASE_DOE_CACHE_PATH, data, allow_pickle=True)
+        data = {
+            "meta": meta,
+            "x_train": x_train,
+            "y_train": run_abaqus_batch(x_train, fidelity="high"),
+            "x_test": x_test,
+            "y_test": run_abaqus_batch(x_test, fidelity="high"),
+            "x_lf": x_lf,
+            "y_lf": run_abaqus_batch(x_lf, fidelity="low"),
+            "x_hf": x_hf,
+            "y_hf": run_abaqus_batch(x_hf, fidelity="high"),
+        }
+    finally:
+        random.setstate(py_state)
+        np.random.set_state(np_state)
+
+    np.save(cache_path, data, allow_pickle=True)
     logger.info(
         f"  train={data['x_train'].shape} | test={data['x_test'].shape} | "
         f"lf={data['x_lf'].shape} | hf={data['x_hf'].shape}"
@@ -545,14 +554,24 @@ def run_ensemble_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dict[st
         List[Dict[str, Any]]: Target-wise benchmark records.
     """
     single_model_builders = {
-        "PRS": lambda: PRS(),
+        "PRS": lambda: PRS(**args.prs_params),
         "RBF": lambda: RBF(),
         "KRG": lambda: KRG(**args.krg_params),
-        "SVR": lambda: SVR(),
+        "SVR": lambda: SVR(**args.svr_params),
     }
     ensemble_builders = {
-        "TAHS": lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params),
-        "AESMSI": lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params),
+        "TAHS": lambda: TAHS(
+            threshold=args.ensemble_threshold,
+            prs_params=args.prs_params,
+            krg_params=args.krg_params,
+            svr_params=args.svr_params,
+        ),
+        "AESMSI": lambda: AESMSI(
+            threshold=args.ensemble_threshold,
+            prs_params=args.prs_params,
+            krg_params=args.krg_params,
+            svr_params=args.svr_params,
+        ),
     }
 
     results: List[Dict[str, Any]] = []
@@ -883,9 +902,10 @@ def save_results(payload: Dict[str, Any]) -> str:
     Returns:
         str: Absolute save path.
     """
-    with open(CASE_RESULTS_PATH, "w", encoding="utf-8") as file:
+    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "case_results.json")
+    with open(save_path, "w", encoding="utf-8") as file:
         json.dump(to_serializable(payload), file, indent=2)
-    return CASE_RESULTS_PATH
+    return save_path
 
 
 def run_case(args: Any) -> Dict[str, Any]:

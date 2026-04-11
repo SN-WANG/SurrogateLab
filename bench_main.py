@@ -33,11 +33,6 @@ from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
 
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULT_FILE_NAME = "bench_results.json"
-RESULT_FILE_PATH = os.path.join(PROJECT_DIR, RESULT_FILE_NAME)
-
-
 # ============================================================
 # Core Utilities
 # ============================================================
@@ -399,14 +394,24 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
         List[Dict[str, Any]]: Per-case benchmark records.
     """
     single_model_builders: Dict[str, Callable[[], Any]] = {
-        "PRS": lambda: PRS(),
+        "PRS": lambda: PRS(**args.prs_params),
         "RBF": lambda: RBF(),
         "KRG": lambda: KRG(**args.krg_params),
-        "SVR": lambda: SVR(),
+        "SVR": lambda: SVR(**args.svr_params),
     }
     ensemble_builders: Dict[str, Callable[[], Any]] = {
-        "TAHS": lambda: TAHS(threshold=args.ensemble_threshold, krg_params=args.krg_params),
-        "AESMSI": lambda: AESMSI(threshold=args.ensemble_threshold, krg_params=args.krg_params),
+        "TAHS": lambda: TAHS(
+            threshold=args.ensemble_threshold,
+            prs_params=args.prs_params,
+            krg_params=args.krg_params,
+            svr_params=args.svr_params,
+        ),
+        "AESMSI": lambda: AESMSI(
+            threshold=args.ensemble_threshold,
+            prs_params=args.prs_params,
+            krg_params=args.krg_params,
+            svr_params=args.svr_params,
+        ),
     }
 
     results: List[Dict[str, Any]] = []
@@ -1062,9 +1067,10 @@ def save_results(payload: Dict[str, Any]) -> str:
     Returns:
         str: Absolute save path.
     """
-    with open(RESULT_FILE_PATH, "w", encoding="utf-8") as file:
+    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_results.json")
+    with open(save_path, "w", encoding="utf-8") as file:
         json.dump(to_serializable(payload), file, indent=2)
-    return RESULT_FILE_PATH
+    return save_path
 
 
 def main() -> None:

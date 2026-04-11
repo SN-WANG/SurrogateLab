@@ -146,20 +146,38 @@ def get_args() -> argparse.Namespace:
     )
 
     # ============================================================
-    # Kriging
+    # KRG
     # ============================================================
 
     kriging = parser.add_argument_group("Kriging")
-    kriging.add_argument("--krg_poly", type=str, default="constant", help="Kriging regression basis.")
-    kriging.add_argument("--krg_kernel", type=str, default="gaussian", help="Kriging correlation kernel.")
-    kriging.add_argument("--krg_theta0", type=float, default=1.0, help="Initial Kriging theta.")
+    kriging.add_argument("--krg_poly", type=str, default="constant", help="KRG regression basis.")
+    kriging.add_argument("--krg_kernel", type=str, default="gaussian", help="KRG correlation kernel.")
+    kriging.add_argument("--krg_theta0", type=float, default=1.0, help="Initial KRG theta.")
     kriging.add_argument(
         "--krg_theta_bounds",
         type=float,
         nargs=2,
         default=[1.0e-6, 100.0],
-        help="Lower and upper bounds for Kriging theta.",
+        help="Lower and upper bounds for KRG theta.",
     )
+
+    # ============================================================
+    # PRS
+    # ============================================================
+
+    prs = parser.add_argument_group("PRS")
+    prs.add_argument("--prs_degree", type=int, default=5, help="Polynomial degree for PRS.")
+    prs.add_argument("--prs_alpha", type=float, default=0.0, help="Ridge regularization for PRS.")
+
+    # ============================================================
+    # SVR
+    # ============================================================
+
+    svr = parser.add_argument_group("SVR")
+    svr.add_argument("--svr_kernel", type=str, default="linear", choices=["rbf", "linear"], help="SVR kernel type.")
+    svr.add_argument("--svr_gamma", type=float, default=None, help="SVR kernel coefficient for the rbf kernel.")
+    svr.add_argument("--svr_C", type=float, default=0.1, help="SVR regularization parameter.")
+    svr.add_argument("--svr_epsilon", type=float, default=2.0, help="SVR epsilon-insensitive tube width.")
 
     # ============================================================
     # Multi-Fidelity
@@ -283,6 +301,16 @@ def get_args() -> argparse.Namespace:
         "kernel": args.krg_kernel,
         "theta0": args.krg_theta0,
         "theta_bounds": tuple(args.krg_theta_bounds),
+    }
+    args.prs_params = {
+        "degree": args.prs_degree,
+        "alpha": args.prs_alpha,
+    }
+    args.svr_params = {
+        "kernel": args.svr_kernel,
+        "gamma": args.svr_gamma,
+        "C": args.svr_C,
+        "epsilon": args.svr_epsilon,
     }
     args.miga_params = {
         "popsize": args.miga_popsize,
