@@ -11,12 +11,12 @@ from typing import Any, Dict, List
 import numpy as np
 from scipy.optimize import NonlinearConstraint
 
+import case_config
+
 try:
     from wing_structure_simulation import AbaqusModel as _ExternalAbaqusModel
 except ImportError:
     _ExternalAbaqusModel = None
-
-import case_config
 
 from models.classical.krg import KRG
 from models.classical.prs import PRS
@@ -38,6 +38,63 @@ from utils.seeder import seed_everything
 # ============================================================
 # Runtime Backends
 # ============================================================
+
+def proxy_branin(x1: float, x2: float) -> float:
+    """
+    Evaluate the analytic proxy Branin surface used by the local case model.
+
+    Args:
+        x1 (float): First design variable.
+        x2 (float): Second design variable.
+
+    Returns:
+        float: Proxy surface value.
+    """
+    a = 1.0
+    b = 5.1 / (4.0 * np.pi ** 2)
+    c = 5.0 / np.pi
+    r = 6.0
+    s = 10.0
+    t = 1.0 / (8.0 * np.pi)
+    return a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1.0 - t) * np.cos(x1) + s
+
+class _LocalProxyAbaqusModel:
+    """
+    Local analytic proxy for engineering validation without Abaqus.
+
+    Args:
+        fidelity (str): Simulation fidelity, "high" or "low".
+    """
+
+    def __init__(self, fidelity: str = "high") -> None:
+        self.fidelity = fidelity
+        self.input_vars = ["thick1", "thick2", "thick3"]
+        self.output_vars = ["weight", "displacement", "stress_skin", "stress_stiff"]
+
+    def run(self, input_arr: np.ndarray) -> np.ndarray:
+        """
+        Execute one Abaqus-style simulation.
+
+        Args:
+            input_arr (np.ndarray): Design vector. (D,).
+
+        Returns:
+            np.ndarray: Structural responses. (4,).
+        """
+        x = np.asarray(input_arr, dtype=np.float64).reshape(-1)
+
+        y_weight = (proxy_branin(x[0], x[1]) + 2.0 * x[2]) / 300.0
+        y_displacement = 0.5 * x[0] ** 2 + 1.2 * x[1] + np.sin(x[2])
+        y_stress_skin = proxy_branin(x[1], x[2]) + 0.8 * x[0]
+        y_stress_stiff = (x[0] - 5.0) ** 2 + (x[1] - 5.0) ** 2 + (x[2] - 5.0) ** 2
+        y = np.array([y_weight, y_displacement, y_stress_skin, y_stress_stiff], dtype=np.float64)
+
+        if self.fidelity == "low":
+            bias = np.array([0.003, 5.0, 5.0, 5.0], dtype=np.float64)
+            noise = np.array([1.0e-4, 0.1, 0.1, 0.1], dtype=np.float64)
+            y = 0.85 * y + bias + np.random.normal(0.0, noise, size=y.shape)
+
+        return y
 
 
 class _ExternalAbaqusModelAdapter:
@@ -79,7 +136,7 @@ def _get_external_abaqus_command() -> str | None:
 
 def get_case_runtime() -> Dict[str, Any]:
     """
-    Detect the external Abaqus runtime availability.
+    Detect the available Abaqus runtime backend.
 
     Returns:
         Dict[str, Any]: Runtime status for solver selection and reporting.
@@ -91,6 +148,7 @@ def get_case_runtime() -> Dict[str, Any]:
     interface_available = _ExternalAbaqusModel is not None
     command_available = command_name is not None and shutil.which(command_name) is not None
     available = interface_available and command_available
+    backend = "EXTERNAL_SOLVER" if available else "LOCAL_PROXY"
 
     get_case_runtime._cache = {
         "solver": "abaqus",
@@ -98,6 +156,7 @@ def get_case_runtime() -> Dict[str, Any]:
         "command_name": command_name,
         "command_available": command_available,
         "available": available,
+        "backend": backend,
     }
     return get_case_runtime._cache
 
@@ -120,6 +179,7 @@ def log_case_runtime(runtime: Dict[str, Any]) -> None:
     logger.info(f"{hue.b}ABAQUS COMMAND        : {hue.m}{command_name}{hue.q}")
     logger.info(f"{hue.b}ABAQUS COMMAND FOUND  : {hue.c}{str(runtime['command_available']).upper()}{hue.q}")
     logger.info(f"{hue.b}ABAQUS AVAILABILITY   : {availability_color}{str(runtime['available']).upper()}{hue.q}")
+    logger.info(f"{hue.b}SOLVER BACKEND        : {hue.m}{runtime['backend']}{hue.q}")
     logger.info(line)
 
 
@@ -128,7 +188,7 @@ log_abaqus_runtime = log_case_runtime
 
 class AbaqusModel:
     """
-    Engineering solver wrapper backed only by the external Abaqus interface.
+    Runtime-selecting engineering solver wrapper.
 
     Args:
         fidelity (str): Simulation fidelity, "high" or "low".
@@ -136,9 +196,9 @@ class AbaqusModel:
 
     def __init__(self, fidelity: str = "high") -> None:
         runtime = get_case_runtime()
-        if not runtime["available"]:
-            raise RuntimeError("Abaqus is unavailable in the current environment.")
-        self.model = _ExternalAbaqusModelAdapter(fidelity=fidelity)
+        model_cls = _ExternalAbaqusModelAdapter if runtime["available"] else _LocalProxyAbaqusModel
+        self.backend = runtime["backend"]
+        self.model = model_cls(fidelity=fidelity)
         self.input_vars = list(self.model.input_vars)
         self.output_vars = list(self.model.output_vars)
 
@@ -397,98 +457,19 @@ def get_target_specs(args: Any) -> List[Dict[str, Any]]:
     return specs
 
 
-def get_case_root() -> str:
+def build_cache_meta(args: Any, runtime: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Return the SurrogateLab case-workflow root directory.
-
-    Returns:
-        str: Absolute case root.
-    """
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def get_case_cache_path(filename: str) -> str:
-    """
-    Build one cache path under the case-workflow root.
-
-    Args:
-        filename (str): Cache filename.
-
-    Returns:
-        str: Absolute cache path.
-    """
-    return os.path.join(get_case_root(), filename)
-
-
-def load_case_cache(path: str) -> Dict[str, Any] | None:
-    """
-    Load one NumPy object cache when it exists.
-
-    Args:
-        path (str): Cache path.
-
-    Returns:
-        Dict[str, Any] | None: Loaded cache payload or ``None``.
-    """
-    if not os.path.isfile(path):
-        return None
-    return np.load(path, allow_pickle=True).item()
-
-
-def save_case_cache(path: str, payload: Dict[str, Any]) -> None:
-    """
-    Save one NumPy object cache.
-
-    Args:
-        path (str): Cache path.
-        payload (Dict[str, Any]): Cache payload.
-    """
-    np.save(path, payload, allow_pickle=True)
-
-
-def cache_meta_matches(cached_meta: Any, expected_meta: Dict[str, Any]) -> bool:
-    """
-    Compare one cache metadata payload with the expected signature.
-
-    Args:
-        cached_meta (Any): Metadata loaded from one cache file.
-        expected_meta (Dict[str, Any]): Expected cache signature.
-
-    Returns:
-        bool: Whether the metadata matches.
-    """
-    if not isinstance(cached_meta, dict):
-        return False
-    return cached_meta == expected_meta
-
-
-def require_abaqus_available(cache_name: str) -> None:
-    """
-    Ensure the external Abaqus runtime is available for cache generation.
-
-    Args:
-        cache_name (str): Cache being regenerated.
-
-    Raises:
-        RuntimeError: If Abaqus is unavailable locally.
-    """
-    runtime = get_case_runtime()
-    if runtime["available"]:
-        return
-    raise RuntimeError(f"{cache_name} is missing or invalid, and Abaqus is unavailable in the current environment.")
-
-
-def build_case_doe_meta(args: Any) -> Dict[str, Any]:
-    """
-    Build the signature stored inside the engineering DOE cache.
+    Build the signature stored inside the unified case DOE cache.
 
     Args:
         args (Any): Parsed arguments.
+        runtime (Dict[str, Any]): Runtime backend metadata.
 
     Returns:
         Dict[str, Any]: Cache metadata signature.
     """
     return {
+        "backend": runtime["backend"],
         "doe_seed": args.doe_seed,
         "num_features": args.num_features,
         "num_outputs": args.num_outputs,
@@ -498,40 +479,6 @@ def build_case_doe_meta(args: Any) -> Dict[str, Any]:
         "num_lf": args.num_lf,
         "num_hf": args.num_hf,
     }
-
-
-def validate_case_doe_cache(cached: Any, args: Any, meta: Dict[str, Any]) -> bool:
-    """
-    Validate one engineering DOE cache payload.
-
-    Args:
-        cached (Any): Loaded cache payload.
-        args (Any): Parsed arguments.
-        meta (Dict[str, Any]): Expected cache signature.
-
-    Returns:
-        bool: Whether the cache is valid for the current run.
-    """
-    if not isinstance(cached, dict):
-        return False
-    if not cache_meta_matches(cached.get("meta"), meta):
-        return False
-
-    expected_shapes = {
-        "x_train": (args.num_train, args.num_features),
-        "y_train": (args.num_train, args.num_outputs),
-        "x_test": (args.num_test, args.num_features),
-        "y_test": (args.num_test, args.num_outputs),
-        "x_lf": (args.num_lf, args.num_features),
-        "y_lf": (args.num_lf, args.num_outputs),
-        "x_hf": (args.num_hf, args.num_features),
-        "y_hf": (args.num_hf, args.num_outputs),
-    }
-    for key, shape in expected_shapes.items():
-        value = cached.get(key)
-        if not isinstance(value, np.ndarray) or value.shape != shape:
-            return False
-    return True
 
 
 def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
@@ -544,21 +491,17 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
     Returns:
         Dict[str, np.ndarray]: Cached engineering data.
     """
-    meta = build_case_doe_meta(args)
-    cache_path = get_case_cache_path("case_doe_cache.npy")
-    cached = load_case_cache(cache_path)
+    runtime = get_case_runtime()
+    meta = build_cache_meta(args, runtime)
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "case_doe_cache.npy")
 
-    if validate_case_doe_cache(cached, args, meta):
-        logger.info(f"{hue.g}Load cached case DOE from {cache_path}{hue.q}")
-        return cached
+    if os.path.isfile(cache_path):
+        cached = np.load(cache_path, allow_pickle=True).item()
+        if cached.get("meta") == meta:
+            logger.info(f"{hue.g}Load cached case DOE from {cache_path}{hue.q}")
+            return cached
+        logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {cache_path}{hue.q}")
 
-    if cached is not None:
-        if cache_meta_matches(cached.get("meta"), meta):
-            logger.info(f"{hue.y}Case DOE cache data is invalid, regenerate {cache_path}{hue.q}")
-        else:
-            logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {cache_path}{hue.q}")
-
-    require_abaqus_available("case_doe_cache.npy")
     logger.info(f"{hue.b}Generate case DOE data{hue.q}")
     x_train = sample_lhs(args.bounds, args.num_train, seed=args.doe_seed)
     x_test = sample_lhs(args.bounds, args.num_test, seed=args.doe_seed + 1)
@@ -586,274 +529,12 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
         random.setstate(py_state)
         np.random.set_state(np_state)
 
-    save_case_cache(cache_path, data)
+    np.save(cache_path, data, allow_pickle=True)
     logger.info(
         f"  train={data['x_train'].shape} | test={data['x_test'].shape} | "
         f"lf={data['x_lf'].shape} | hf={data['x_hf'].shape}"
     )
     return data
-
-
-def build_case_active_meta(args: Any) -> Dict[str, Any]:
-    """
-    Build the signature stored inside the engineering active-learning cache.
-
-    Args:
-        args (Any): Parsed arguments.
-
-    Returns:
-        Dict[str, Any]: Cache metadata signature.
-    """
-    return {
-        "active_seed": args.active_seed,
-        "num_features": args.num_features,
-        "num_outputs": args.num_outputs,
-        "bounds": args.bounds.tolist(),
-        "targets": list(args.targets),
-        "num_active_initial": args.num_active_initial,
-        "num_infill": args.num_infill,
-        "infill_criterion": args.infill_criterion,
-        "diso_alpha": args.diso_alpha,
-        "diso_min_distance": args.diso_min_distance,
-        "diso_distance_scale": args.diso_distance_scale,
-        "krg_params": to_serializable(args.krg_params),
-    }
-
-
-def create_empty_active_cache(meta: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create one empty engineering active-learning cache payload.
-
-    Args:
-        meta (Dict[str, Any]): Cache signature.
-
-    Returns:
-        Dict[str, Any]: Empty cache payload.
-    """
-    return {
-        "meta": meta,
-        "x_initial": None,
-        "y_initial": None,
-        "targets": {},
-    }
-
-
-def load_case_active_cache(args: Any) -> Dict[str, Any]:
-    """
-    Load and sanitize the engineering active-learning cache.
-
-    Args:
-        args (Any): Parsed arguments.
-
-    Returns:
-        Dict[str, Any]: Active-learning cache payload.
-    """
-    meta = build_case_active_meta(args)
-    cache_path = get_case_cache_path("case_active_cache.npy")
-    cached = load_case_cache(cache_path)
-    empty_cache = create_empty_active_cache(meta)
-
-    if cached is None:
-        return empty_cache
-
-    if not cache_meta_matches(cached.get("meta"), meta):
-        logger.info(f"{hue.y}Case active cache metadata changed, regenerate {cache_path}{hue.q}")
-        return empty_cache
-
-    cache = create_empty_active_cache(meta)
-    x_initial = cached.get("x_initial")
-    y_initial = cached.get("y_initial")
-    valid_initial = (
-        isinstance(x_initial, np.ndarray)
-        and x_initial.shape == (args.num_active_initial, args.num_features)
-        and isinstance(y_initial, np.ndarray)
-        and y_initial.shape == (args.num_active_initial, args.num_outputs)
-    )
-    if valid_initial:
-        cache["x_initial"] = x_initial
-        cache["y_initial"] = y_initial
-
-    cached_targets = cached.get("targets")
-    if valid_initial and isinstance(cached_targets, dict):
-        for name in args.targets:
-            target_payload = cached_targets.get(name)
-            if not isinstance(target_payload, dict):
-                continue
-            x_infill = target_payload.get("x_infill")
-            y_infill = target_payload.get("y_infill")
-            valid_entry = (
-                isinstance(x_infill, np.ndarray)
-                and isinstance(y_infill, np.ndarray)
-                and x_infill.ndim == 2
-                and y_infill.ndim == 2
-                and x_infill.shape[0] == y_infill.shape[0]
-                and x_infill.shape[0] <= args.num_infill
-                and x_infill.shape[1] == args.num_features
-                and y_infill.shape[1] == args.num_outputs
-            )
-            if valid_entry:
-                cache["targets"][name] = {
-                    "output_idx": int(case_config.TARGET_SPECS[name]["output_idx"]),
-                    "x_infill": x_infill,
-                    "y_infill": y_infill,
-                }
-
-    if cache["x_initial"] is not None or cache["targets"]:
-        logger.info(f"{hue.g}Load cached case active data from {cache_path}{hue.q}")
-    return cache
-
-
-def ensure_active_initial_data(args: Any, cache: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray, bool]:
-    """
-    Load or generate the shared initial active-learning samples.
-
-    Args:
-        args (Any): Parsed arguments.
-        cache (Dict[str, Any]): Active-learning cache payload.
-
-    Returns:
-        tuple[np.ndarray, np.ndarray, bool]: Initial designs, initial responses, update flag.
-    """
-    x_initial_expected = sample_lhs(args.bounds, args.num_active_initial)
-    x_initial_cached = cache.get("x_initial")
-    y_initial_cached = cache.get("y_initial")
-
-    if isinstance(x_initial_cached, np.ndarray) and isinstance(y_initial_cached, np.ndarray):
-        if np.allclose(x_initial_cached, x_initial_expected, rtol=1.0e-12, atol=1.0e-12):
-            return x_initial_cached.copy(), y_initial_cached.copy(), False
-        logger.info(f"{hue.y}Case active cache initial design changed, regenerate case_active_cache.npy{hue.q}")
-        cache["x_initial"] = None
-        cache["y_initial"] = None
-        cache["targets"] = {}
-
-    require_abaqus_available("case_active_cache.npy")
-    y_initial = run_abaqus_batch(x_initial_expected, fidelity="high")
-    cache["x_initial"] = x_initial_expected
-    cache["y_initial"] = y_initial
-    cache["targets"] = {}
-    return x_initial_expected.copy(), y_initial.copy(), True
-
-
-def get_active_target_cache_entry(args: Any, cache: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fetch one target-specific active-learning cache entry.
-
-    Args:
-        args (Any): Parsed arguments.
-        cache (Dict[str, Any]): Active-learning cache payload.
-        target (Dict[str, Any]): Target spec.
-
-    Returns:
-        Dict[str, Any]: Target-specific cache entry.
-    """
-    entry = cache["targets"].get(target["name"])
-    if entry is None:
-        entry = {
-            "output_idx": int(target["output_idx"]),
-            "x_infill": np.empty((0, args.num_features), dtype=np.float64),
-            "y_infill": np.empty((0, args.num_outputs), dtype=np.float64),
-        }
-        cache["targets"][target["name"]] = entry
-    return entry
-
-
-def run_active_learning_target(
-    args: Any,
-    data: Dict[str, np.ndarray],
-    target: Dict[str, Any],
-    x_initial: np.ndarray,
-    y_initial_full: np.ndarray,
-    cache: Dict[str, Any],
-) -> tuple[Dict[str, Any], bool]:
-    """
-    Replay or extend one target-specific active-learning trajectory.
-
-    Args:
-        args (Any): Parsed arguments.
-        data (Dict[str, np.ndarray]): Engineering DOE data.
-        target (Dict[str, Any]): Target spec.
-        x_initial (np.ndarray): Initial designs. (N0, D).
-        y_initial_full (np.ndarray): Initial responses. (N0, C).
-        cache (Dict[str, Any]): Active-learning cache payload.
-
-    Returns:
-        tuple[Dict[str, Any], bool]: Target record and cache update flag.
-    """
-    x_current = x_initial.copy()
-    y_current = select_output(y_initial_full, target["output_idx"]).copy()
-    y_test = select_output(data["y_test"], target["output_idx"])
-
-    model_before = fit_krg(x_current, y_current, args)
-    metrics_before = evaluate_metrics(y_test, predict_mean(model_before, data["x_test"]), eps=args.metric_eps)
-
-    history_best: List[float] = []
-    cache_updated = False
-    target_cache = get_active_target_cache_entry(args, cache, target)
-    cached_count = target_cache["x_infill"].shape[0]
-    hf_model = None
-
-    for step in range(args.num_infill):
-        model_iter = fit_krg(x_current, y_current, args)
-        strategy = DISOInfill(
-            model=model_iter,
-            bounds=args.bounds,
-            x_train=x_current,
-            y_train=y_current,
-            criterion=args.infill_criterion,
-            target_idx=0,
-            alpha=args.diso_alpha,
-            min_distance=args.diso_min_distance,
-            distance_scale=args.diso_distance_scale,
-        )
-        x_expected = strategy.propose()
-
-        if step < cached_count:
-            x_cached = target_cache["x_infill"][step : step + 1]
-            if np.allclose(x_cached, x_expected, rtol=1.0e-10, atol=1.0e-10):
-                x_new = x_cached
-                y_new_full = target_cache["y_infill"][step : step + 1]
-            else:
-                logger.info(
-                    f"{hue.y}Case active cache trajectory changed for {target['label']} at infill {step + 1}, "
-                    f"regenerate remaining tail{hue.q}"
-                )
-                target_cache["x_infill"] = target_cache["x_infill"][:step]
-                target_cache["y_infill"] = target_cache["y_infill"][:step]
-                cached_count = step
-
-        if step >= cached_count:
-            require_abaqus_available("case_active_cache.npy")
-            if hf_model is None:
-                hf_model = AbaqusModel(fidelity="high")
-            x_new = x_expected
-            y_new_full = hf_model.run(x_new[0]).reshape(1, -1)
-            target_cache["x_infill"] = np.vstack([target_cache["x_infill"], x_new])
-            target_cache["y_infill"] = np.vstack([target_cache["y_infill"], y_new_full])
-            cache_updated = True
-
-        y_new = y_new_full[:, target["output_idx"] : target["output_idx"] + 1]
-        x_current = np.vstack([x_current, x_new])
-        y_current = np.vstack([y_current, y_new])
-        history_best.append(float(np.min(y_current[:, 0])))
-
-    model_after = fit_krg(x_current, y_current, args)
-    metrics_after = evaluate_metrics(y_test, predict_mean(model_after, data["x_test"]), eps=args.metric_eps)
-    gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
-    passed = gain >= args.active_learning_min_relative_gain
-
-    record = {
-        "target": target["name"],
-        "algorithm": "DISO",
-        "criterion": args.infill_criterion,
-        "num_initial": int(args.num_active_initial),
-        "num_infill": args.num_infill,
-        "before": metrics_before,
-        "after": metrics_after,
-        "accuracy_gain": gain,
-        "history_best": history_best,
-        "passed": passed,
-    }
-    return record, cache_updated
 
 
 # ============================================================
@@ -1007,34 +688,63 @@ def run_active_learning_section(args: Any, data: Dict[str, np.ndarray]) -> List[
     """
     results: List[Dict[str, Any]] = []
     logger.info(f"{hue.b}Case Active Learning{hue.q}")
-    cache_path = get_case_cache_path("case_active_cache.npy")
-    cache = load_case_active_cache(args)
-    cache_updated = False
+    x_initial = sample_lhs(args.bounds, args.num_active_initial)
+    y_initial_full = run_abaqus_batch(x_initial, fidelity="high")
 
-    np_state = np.random.get_state()
-    py_state = random.getstate()
-    try:
-        reset_random_state(args.active_seed)
-        x_initial, y_initial_full, initial_updated = ensure_active_initial_data(args, cache)
-        cache_updated = cache_updated or initial_updated
+    for target in get_target_specs(args):
+        x_current = x_initial.copy()
+        y_current = select_output(y_initial_full, target["output_idx"]).copy()
+        y_test = select_output(data["y_test"], target["output_idx"])
 
-        for target in get_target_specs(args):
-            record, target_updated = run_active_learning_target(args, data, target, x_initial, y_initial_full, cache)
-            cache_updated = cache_updated or target_updated
-            status = "PASS" if record["passed"] else "FAIL"
-            logger.info(
-                f"  {target['label']} | acc {record['before']['accuracy']:.2f}% -> {record['after']['accuracy']:.2f}% | "
-                f"r2 {record['before']['r2']:.4f} -> {record['after']['r2']:.4f} | "
-                f"gain={100.0 * record['accuracy_gain']:.2f}% -> {status}"
+        model_before = fit_krg(x_current, y_current, args)
+        metrics_before = evaluate_metrics(y_test, predict_mean(model_before, data["x_test"]), eps=args.metric_eps)
+
+        history_best: List[float] = []
+        hf_model = AbaqusModel(fidelity="high")
+        for _ in range(args.num_infill):
+            model_iter = fit_krg(x_current, y_current, args)
+            strategy = DISOInfill(
+                model=model_iter,
+                bounds=args.bounds,
+                x_train=x_current,
+                y_train=y_current,
+                criterion=args.infill_criterion,
+                target_idx=0,
+                alpha=args.diso_alpha,
+                min_distance=args.diso_min_distance,
+                distance_scale=args.diso_distance_scale,
             )
-            results.append(record)
-    finally:
-        random.setstate(py_state)
-        np.random.set_state(np_state)
+            x_new = strategy.propose()
+            y_new_full = hf_model.run(x_new[0])
+            y_new = y_new_full[target["output_idx"] : target["output_idx"] + 1].reshape(1, 1)
+            x_current = np.vstack([x_current, x_new])
+            y_current = np.vstack([y_current, y_new])
+            history_best.append(float(np.min(y_current[:, 0])))
 
-    if cache_updated:
-        save_case_cache(cache_path, cache)
-        logger.info(f"{hue.g}Save case active cache to {cache_path}{hue.q}")
+        model_after = fit_krg(x_current, y_current, args)
+        metrics_after = evaluate_metrics(y_test, predict_mean(model_after, data["x_test"]), eps=args.metric_eps)
+        gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
+        passed = gain >= args.active_learning_min_relative_gain
+        status = "PASS" if passed else "FAIL"
+
+        logger.info(
+            f"  {target['label']} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
+            f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}% -> {status}"
+        )
+        results.append(
+            {
+                "target": target["name"],
+                "algorithm": "DISO",
+                "criterion": args.infill_criterion,
+                "num_initial": int(args.num_active_initial),
+                "num_infill": args.num_infill,
+                "before": metrics_before,
+                "after": metrics_after,
+                "accuracy_gain": gain,
+                "history_best": history_best,
+                "passed": passed,
+            }
+        )
 
     return results
 
@@ -1260,16 +970,7 @@ def main() -> None:
     Execute the engineering case workflow from the command line.
     """
     args = case_config.get_args()
-    try:
-        payload = run_case(args)
-    except RuntimeError as exc:
-        message = str(exc)
-        if message == "Abaqus is unavailable in the current environment." or message.endswith(
-            "and Abaqus is unavailable in the current environment."
-        ):
-            logger.error(f"{hue.r}{message}{hue.q}")
-            raise SystemExit(1) from None
-        raise
+    payload = run_case(args)
     save_path = save_results(payload)
     logger.info(f"{hue.g}Case report saved to {save_path}{hue.q}")
 
