@@ -58,7 +58,7 @@ SAMPLE_COUNTS = {
     "num_test": 50,
     "num_lf": 30,
     "num_hf": 15,
-    "num_active_initial": 1,
+    "num_active_initial": 2,
     "num_infill": 21,
 }
 
@@ -101,7 +101,7 @@ def get_args() -> argparse.Namespace:
     # ============================================================
 
     general = parser.add_argument_group("General")
-    general.add_argument("--seed", type=int, default=42, help="Random seed.")
+    general.add_argument("--seed", type=int, default=7, help="Random seed.")
     general.add_argument("--seed_mode", type=str, default="single_seed", help="Run mode written into payload metadata.")
     general.add_argument(
         "--demos",
