@@ -182,7 +182,7 @@ def get_args() -> argparse.Namespace:
     # ============================================================
 
     prs = parser.add_argument_group("PRS")
-    prs.add_argument("--prs_degree", type=int, default=5, help="Polynomial degree for PRS.")
+    prs.add_argument("--prs_degree", type=int, default=6, help="Polynomial degree for PRS.")
     prs.add_argument("--prs_alpha", type=float, default=0.0, help="Ridge regularization for PRS.")
 
     # ============================================================
@@ -244,6 +244,12 @@ def get_args() -> argparse.Namespace:
         default="ei",
         choices=["ei", "poi", "lcb", "mse"],
         help="Base DISO acquisition.",
+    )
+    active.add_argument(
+        "--active_seed",
+        type=int,
+        default=7,
+        help="Dedicated random seed used only by the engineering active-learning generator.",
     )
     active.add_argument("--diso_alpha", type=float, default=4.0, help="Distance penalty intensity for DISO infill.")
     active.add_argument(
