@@ -3,16 +3,23 @@
 
 import argparse
 import ast
+import io
 import json
 import os
 import runpy
 import shlex
 import sys
 import tokenize
-import trace
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+try:
+    from coverage import Coverage
+    from coverage.exceptions import CoverageException
+except ImportError:
+    Coverage = None
+    CoverageException = Exception
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +30,7 @@ from utils.hue_logger import hue
 
 
 DEFAULT_SOURCE_ROOTS = ("models", "sampling")
+DEFAULT_COVERAGE_DATA_FILE = ".coverage_live"
 KEEP_MODULE_NAMES = {"__main__"}
 KEEP_MODULE_PREFIXES = ("utils.module_quality_gate",)
 
@@ -79,6 +87,7 @@ class EntryMetrics:
 
     entry_file: str
     return_code: int
+    coverage_report: str
     module_count: int
     executable_lines: int
     covered_lines: int
@@ -506,7 +515,7 @@ def score_complexity(path: Path) -> Tuple[int, int]:
 
 
 # ============================================================
-# Dynamic Coverage
+# Dynamic Coverage via coverage.py
 # ============================================================
 
 def normalize_exit_code(exit_code: object) -> int:
@@ -528,7 +537,7 @@ def normalize_exit_code(exit_code: object) -> int:
 
 def purge_local_modules(project_root: Path) -> None:
     """
-    Remove cached local project modules before a traced run.
+    Remove cached local project modules before a measured run.
 
     Args:
         project_root (Path): Repository root.
@@ -555,65 +564,64 @@ def purge_local_modules(project_root: Path) -> None:
         sys.modules.pop(name, None)
 
 
-def build_hit_map(raw_counts: Dict[Tuple[str, int], int]) -> Dict[Path, Set[int]]:
+def require_coverage_package() -> "Coverage":
     """
-    Convert raw trace counts into a per-file executed-line map.
-
-    Args:
-        raw_counts (Dict[Tuple[str, int], int]): Raw trace counts.
+    Return the coverage.py entry point or raise a clear runtime error.
 
     Returns:
-        Dict[Path, Set[int]]: Executed line numbers grouped by resolved path.
+        Coverage: The coverage.py Coverage class.
     """
-    hit_map: Dict[Path, Set[int]] = {}
-
-    for (filename, lineno), count in raw_counts.items():
-        if count <= 0:
-            continue
-        resolved_path = Path(filename).resolve()
-        hit_map.setdefault(resolved_path, set()).add(lineno)
-
-    return hit_map
+    if Coverage is None:
+        raise RuntimeError(
+            "coverage.py is required for dynamic coverage measurement. "
+            "Install it in the target environment before running module_quality_gate."
+        )
+    return Coverage
 
 
-def executable_line_set(path: Path) -> Set[int]:
+def resolve_coverage_data_file(coverage_data_file: Path, project_root: Path) -> Path:
     """
-    Collect executable source lines using the stdlib trace parser.
+    Resolve the on-disk coverage data file location.
 
     Args:
-        path (Path): Python source path.
+        coverage_data_file (Path): Configured coverage data file path.
+        project_root (Path): Repository root.
 
     Returns:
-        Set[int]: Executable physical line numbers.
+        Path: Absolute coverage data path.
     """
-    return {lineno for lineno in trace._find_executable_linenos(str(path)).keys() if lineno > 0}
+    if coverage_data_file.is_absolute():
+        return coverage_data_file
+    return (project_root / coverage_data_file).resolve()
 
 
-def execute_traced_entry(entry_path: Path, entry_args: Sequence[str], project_root: Path) -> Tuple[int, Dict[Path, Set[int]]]:
+def execute_covered_entry(
+    entry_path: Path,
+    entry_args: Sequence[str],
+    project_root: Path,
+    coverage_data_file: Path,
+) -> Tuple[int, "Coverage"]:
     """
-    Execute one entry script under stdlib trace and collect executed lines.
+    Execute one entry script under coverage.py and save the data file.
 
     Args:
         entry_path (Path): Entry script path.
         entry_args (Sequence[str]): Command-line arguments for the entry script.
         project_root (Path): Repository root.
+        coverage_data_file (Path): coverage.py data file.
 
     Returns:
-        Tuple[int, Dict[Path, Set[int]]]: Exit code and executed lines grouped by file.
+        Tuple[int, Coverage]: Exit code and populated coverage session.
     """
+    coverage_cls = require_coverage_package()
     purge_local_modules(project_root)
-
-    ignoredirs = tuple(
-        path
-        for path in {
-            sys.prefix,
-            sys.exec_prefix,
-            sys.base_prefix,
-            getattr(sys, "base_exec_prefix", sys.exec_prefix),
-        }
-        if path
+    # Measure the whole repository so imported utility modules are tracked too.
+    coverage_session = coverage_cls(
+        data_file=str(coverage_data_file),
+        config_file=False,
+        source=[str(project_root)],
     )
-    tracer = trace.Trace(count=True, trace=False, ignoredirs=ignoredirs)
+    coverage_session.erase()
 
     original_cwd = Path.cwd()
     original_argv = list(sys.argv)
@@ -626,39 +634,74 @@ def execute_traced_entry(entry_path: Path, entry_args: Sequence[str], project_ro
 
         sys.argv = [str(entry_path)] + list(entry_args)
 
+        coverage_session.start()
         try:
-            tracer.runfunc(runpy.run_path, str(entry_path), run_name="__main__")
-            return_code = 0
-        except SystemExit as error:
-            return_code = normalize_exit_code(error.code)
+            try:
+                runpy.run_path(str(entry_path), run_name="__main__")
+                return_code = 0
+            except SystemExit as error:
+                return_code = normalize_exit_code(error.code)
+        finally:
+            coverage_session.stop()
+            coverage_session.save()
 
-        return return_code, build_hit_map(tracer.results().counts)
+        return return_code, coverage_session
     finally:
         os.chdir(original_cwd)
         sys.argv = original_argv
         sys.path[:] = original_sys_path
 
 
-def score_module(path: Path, hit_map: Dict[Path, Set[int]]) -> ModuleMetrics:
+def render_coverage_report(coverage_session: "Coverage", module_paths: Sequence[Path]) -> str:
+    """
+    Render the textual coverage.py report equivalent to ``coverage report -m``.
+
+    Args:
+        coverage_session (Coverage): Populated coverage session.
+        module_paths (Sequence[Path]): File paths to include in the report.
+
+    Returns:
+        str: Textual report body.
+    """
+    if not module_paths:
+        return "No target modules were discovered for coverage reporting."
+
+    output = io.StringIO()
+
+    try:
+        coverage_session.report(
+            morfs=[str(path) for path in module_paths],
+            show_missing=True,
+            file=output,
+            precision=2,
+        )
+    except CoverageException as error:
+        return f"coverage report unavailable: {error}"
+
+    return output.getvalue().rstrip()
+
+
+def score_module(path: Path, coverage_session: "Coverage") -> ModuleMetrics:
     """
     Compute dynamic coverage and static quality metrics for one target module.
 
     Args:
         path (Path): Target module path.
-        hit_map (Dict[Path, Set[int]]): Executed lines grouped by file.
+        coverage_session (Coverage): Populated coverage session.
 
     Returns:
         ModuleMetrics: Per-module metric payload.
     """
-    executable_lines = executable_line_set(path)
-    covered_lines = executable_lines & hit_map.get(path.resolve(), set())
+    resolved_name, executable_lines, _, missing_lines, _ = coverage_session.analysis2(str(path))
+    executable_line_set = set(executable_lines)
+    missing_line_set = set(missing_lines)
     comment_lines, relevant_lines = score_comment_rate(path)
     block_count, total_complexity = score_complexity(path)
 
     return ModuleMetrics(
-        path=path.resolve(),
-        executable_lines=len(executable_lines),
-        covered_lines=len(covered_lines),
+        path=Path(resolved_name).resolve(),
+        executable_lines=len(executable_line_set),
+        covered_lines=len(executable_line_set - missing_line_set),
         comment_lines=comment_lines,
         relevant_lines=relevant_lines,
         block_count=block_count,
@@ -671,6 +714,7 @@ def evaluate_dynamic_entry(
     entry_args: Optional[Sequence[str]] = None,
     project_root: Path = PROJECT_ROOT,
     source_roots: Sequence[str] = DEFAULT_SOURCE_ROOTS,
+    coverage_data_file: Path = Path(DEFAULT_COVERAGE_DATA_FILE),
 ) -> EntryMetrics:
     """
     Execute one workflow entry and evaluate dynamic coverage plus static quality metrics.
@@ -680,6 +724,7 @@ def evaluate_dynamic_entry(
         entry_args (Optional[Sequence[str]]): Command-line arguments for the entry script.
         project_root (Path): Repository root.
         source_roots (Sequence[str]): Source roots used to discover target modules.
+        coverage_data_file (Path): coverage.py data file path.
 
     Returns:
         EntryMetrics: Aggregated metrics for the entry workflow.
@@ -688,13 +733,21 @@ def evaluate_dynamic_entry(
     target_paths = discover_target_modules(project_root, source_roots)
     entry_closure = discover_entry_closure(entry_path, project_root)
     scoped_targets = sorted(path.resolve() for path in target_paths if path.resolve() in entry_closure)
+    resolved_data_file = resolve_coverage_data_file(coverage_data_file, project_root)
 
-    return_code, hit_map = execute_traced_entry(entry_path, [] if entry_args is None else list(entry_args), project_root)
-    module_metrics = [score_module(path, hit_map) for path in scoped_targets]
+    return_code, coverage_session = execute_covered_entry(
+        entry_path,
+        [] if entry_args is None else list(entry_args),
+        project_root,
+        resolved_data_file,
+    )
+    module_metrics = [score_module(path, coverage_session) for path in scoped_targets]
+    coverage_report = render_coverage_report(coverage_session, scoped_targets)
 
     return EntryMetrics(
         entry_file=entry_file,
         return_code=return_code,
+        coverage_report=coverage_report,
         module_count=len(module_metrics),
         executable_lines=sum(item.executable_lines for item in module_metrics),
         covered_lines=sum(item.covered_lines for item in module_metrics),
@@ -711,6 +764,7 @@ def evaluate_dynamic_sequence(
     bench_args: Optional[Sequence[str]] = None,
     project_root: Path = PROJECT_ROOT,
     source_roots: Sequence[str] = DEFAULT_SOURCE_ROOTS,
+    coverage_data_file: Path = Path(DEFAULT_COVERAGE_DATA_FILE),
 ) -> List[EntryMetrics]:
     """
     Execute the case and benchmark workflows in order and collect their metrics.
@@ -720,13 +774,26 @@ def evaluate_dynamic_sequence(
         bench_args (Optional[Sequence[str]]): Command-line arguments for ``bench_main.py``.
         project_root (Path): Repository root.
         source_roots (Sequence[str]): Source roots used to discover target modules.
+        coverage_data_file (Path): coverage.py data file path reused across runs.
 
     Returns:
         List[EntryMetrics]: Entry metrics in execution order.
     """
     return [
-        evaluate_dynamic_entry("case_main.py", entry_args=case_args, project_root=project_root, source_roots=source_roots),
-        evaluate_dynamic_entry("bench_main.py", entry_args=bench_args, project_root=project_root, source_roots=source_roots),
+        evaluate_dynamic_entry(
+            "case_main.py",
+            entry_args=case_args,
+            project_root=project_root,
+            source_roots=source_roots,
+            coverage_data_file=coverage_data_file,
+        ),
+        evaluate_dynamic_entry(
+            "bench_main.py",
+            entry_args=bench_args,
+            project_root=project_root,
+            source_roots=source_roots,
+            coverage_data_file=coverage_data_file,
+        ),
     ]
 
 
@@ -808,6 +875,18 @@ def print_entry_details(result: EntryMetrics, project_root: Path = PROJECT_ROOT)
         print(f"{module_name:<44} {item.coverage_rate:>7.2f}% {item.comment_rate:>7.2f}% {item.average_complexity:>8.2f}")
 
 
+def print_entry_coverage_report(result: EntryMetrics) -> None:
+    """
+    Print the raw coverage.py text report for one workflow entry.
+
+    Args:
+        result (EntryMetrics): Entry metrics.
+    """
+    print("")
+    print(f"{hue.b}{result.entry_file} Coverage Report{hue.q}")
+    print(result.coverage_report)
+
+
 def build_result_payload(results: Sequence[EntryMetrics], thresholds: Thresholds) -> Dict[str, object]:
     """
     Build a JSON-serializable result payload.
@@ -836,6 +915,7 @@ def build_result_payload(results: Sequence[EntryMetrics], thresholds: Thresholds
 
     return {
         "mode": "dynamic-coverage",
+        "dynamic_engine": "coverage.py",
         "thresholds": {
             "coverage": thresholds.coverage,
             "comment_rate": thresholds.comment_rate,
@@ -861,8 +941,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "Run case_main.py and bench_main.py sequentially, measure dynamic coverage on "
-            "their shared surrogate modules, then print the three metrics for each workflow."
+            "Run case_main.py and bench_main.py sequentially, collect dynamic coverage with "
+            "coverage.py, then print the three metrics for each workflow."
         )
     )
     parser.add_argument(
@@ -890,6 +970,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Extra command-line arguments passed to bench_main.py.",
     )
     parser.add_argument(
+        "--coverage-data-file",
+        type=Path,
+        default=Path(DEFAULT_COVERAGE_DATA_FILE),
+        help="coverage.py data file, equivalent to --data-file for coverage run/report.",
+    )
+    parser.add_argument(
         "--coverage-threshold",
         type=float,
         default=80.0,
@@ -911,6 +997,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--details",
         action="store_true",
         help="Also print per-module details for each workflow.",
+    )
+    parser.add_argument(
+        "--coverage-report",
+        action="store_true",
+        help="Also print the raw coverage.py text report equivalent to coverage report -m.",
     )
     parser.add_argument(
         "--json",
@@ -944,6 +1035,7 @@ def cli_main(argv: Optional[Sequence[str]] = None) -> int:
         bench_args=bench_args,
         project_root=args.project_root.resolve(),
         source_roots=args.source_roots,
+        coverage_data_file=args.coverage_data_file,
     )
 
     if args.json:
@@ -951,6 +1043,8 @@ def cli_main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         for result in results:
             print_entry_metrics(result, thresholds)
+            if args.coverage_report:
+                print_entry_coverage_report(result)
         if args.details:
             for result in results:
                 print_entry_details(result, project_root=args.project_root.resolve())
