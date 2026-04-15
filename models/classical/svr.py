@@ -40,6 +40,9 @@ class SVR:
         self.intercept_: Optional[np.ndarray] = None
         self.fitted = False
 
+    # ============================================================
+    # Kernel Matrix
+    # ============================================================
     # ------------------------------------------------------------------
 
     def _build_features(self, x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
@@ -54,14 +57,22 @@ class SVR:
             np.ndarray: Feature matrix. Shape: (num_samples_1, num_samples_2), dtype: float64.
         """
         if self.kernel == "linear":
+            # Linear kernel:
+            # K(x_i, x_j) = x_i^T x_j.
+            # This corresponds to a primal hyperplane in the original feature space.
             return x1 @ x2.T
         elif self.kernel == "rbf":
-            # pairwise squared euclidean distance
+            # RBF kernel:
+            # K(x_i, x_j) = exp(-gamma ||x_i - x_j||^2).
+            # The squared distance is expanded in matrix form for vectorized evaluation.
             dists = np.sum(x1**2, axis=1, keepdims=True) + np.sum(x2**2, axis=1) - 2.0 * (x1 @ x2.T)
             return np.exp(-self.gamma * dists)
         else:
             raise ValueError(f"Unsupported kernel: {self.kernel}")
 
+    # ============================================================
+    # Dual Quadratic Program
+    # ============================================================
     # ------------------------------------------------------------------
 
     def _solve_dual(self, phi: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -83,9 +94,11 @@ class SVR:
         """
         num_samples = y.shape[0]
 
-        # optimization objective (using dual form derivation)
-        # we optimize x = [alpha; alpha*] to adhere to standard QP form strictly
-        # variables: x = [alpha_1, ..., alpha_n, alpha*_1, ..., alpha*_n] (size 2*n)
+        # Optimize the standard epsilon-SVR dual variables
+        # x = [alpha; alpha*], with beta = alpha - alpha*.
+        # The dual objective is:
+        # 0.5 * beta^T K beta - y^T beta + epsilon * sum(alpha + alpha*).
+        # The epsilon tube enforces zero loss whenever |y - f(x)| <= epsilon.
 
         def objective(x):
             alpha, alpha_star = x[:num_samples], x[num_samples:]
@@ -96,6 +109,7 @@ class SVR:
 
             # linear term: epsilon * sum(alpha + alpha*) - beta.T @ y
             term2 = self.epsilon * np.sum(alpha + alpha_star) - y @ beta
+            # The dual objective is convex because the kernel Gram matrix K is PSD.
 
             return term1 + term2
 
@@ -103,16 +117,21 @@ class SVR:
         def jacobian(x):
             alpha, alpha_star = x[:num_samples], x[num_samples:]
             beta = alpha - alpha_star
+            # grad_beta = K beta - y, then map to alpha and alpha* blocks.
             grad_base = phi @ beta - y
             grad_alpha = grad_base + self.epsilon
             grad_alpha_star = -grad_base + self.epsilon
             return np.concatenate([grad_alpha, grad_alpha_star])
 
-        # constraints: sum(alpha - alpha*) = 0
+        # Equality constraint:
+        # sum_i (alpha_i - alpha_i*) = sum_i beta_i = 0.
         constraints = [{"type": "eq", "fun": lambda x: np.sum(x[:num_samples] - x[num_samples:])}]
+        # This zero-sum constraint is what allows the intercept b to appear in the predictor.
 
-        # bounds: 0 <= alpha, alpha* <= C
+        # Box constraints:
+        # 0 <= alpha_i, alpha_i* <= C.
         bounds = Bounds(np.zeros(2 * num_samples), np.full(2 * num_samples, self.C))
+        # Larger C penalizes tube violations more strongly and makes the fit less regularized.
 
         # initial guess
         x0 = np.zeros(2 * num_samples)
@@ -127,13 +146,13 @@ class SVR:
 
         alpha_final, alpha_star_final = np.split(res.x, 2)
         beta = alpha_final - alpha_star_final
+        # beta_i > 0 and beta_i < 0 correspond to opposite sides of the epsilon tube.
 
-        # threshold small values to zero (sparsity)
+        # Small |beta_i| values are pruned to recover sparse support vectors.
         beta[np.abs(beta) < 1e-5] = 0.0
 
-        # compute intercept (bias) using support vectors
-        # sv_indices: 0 < alpha < C  OR  0 < alpha* < C
-        # robustly: use free support vectors (not at bounds)
+        # Free support vectors satisfy 0 < |beta_i| < C and can be used to recover
+        # the bias from y_i = sum_j beta_j K_ij + b +/- epsilon.
         sv_mask = (np.abs(beta) > 1e-5) & (np.abs(beta) < self.C - 1e-5)
 
         if np.any(sv_mask):
@@ -146,8 +165,12 @@ class SVR:
             # fallback if no free support vectors are found
             intercept = 0.0
 
+        # The returned pair (beta, b) defines f(x) = sum_i beta_i K(x, x_i) + b.
         return beta, intercept
 
+    # ============================================================
+    # Multi-Output Training
+    # ============================================================
     # ------------------------------------------------------------------
 
     def fit(self, x_train: np.ndarray, y_train: np.ndarray) -> None:
@@ -160,27 +183,37 @@ class SVR:
         """
         x_scaled = self.scaler_x.fit(x_train, channel_dim=1).transform(x_train)
         y_scaled = self.scaler_y.fit(y_train, channel_dim=1).transform(y_train)
+        # Training is carried out in standardized coordinates so the kernel
+        # scale and epsilon tube are not dominated by raw engineering units.
 
         if self.gamma is None:
             x_var = x_scaled.var()
+            # Common kernel-width heuristic:
+            # gamma = 1 / (D * Var(X)).
             self.gamma = 1.0 / (x_scaled.shape[1] * x_var) if x_var > 0 else 1.0
 
         phi = self._build_features(x_scaled, x_scaled)
+        # phi is the Gram matrix K(X, X) used by every output dimension.
 
         # storage for multi-target
         num_samples, target_dim = y_scaled.shape
         self.dual_coef_ = np.zeros((num_samples, target_dim))
         self.intercept_ = np.zeros(target_dim)
         self.support_vectors_ = x_scaled  # store scaled support vectors
+        # The same support-vector matrix X is reused across all output channels.
 
         # fit per target dimension
         for d in range(target_dim):
+            # Each output solves an independent epsilon-SVR dual problem.
             beta, bias = self._solve_dual(phi, y_scaled[:, d])
             self.dual_coef_[:, d] = beta
             self.intercept_[d] = bias
 
         self.fitted = True
 
+    # ============================================================
+    # Kernel Prediction
+    # ============================================================
     # ------------------------------------------------------------------
 
     def predict(self, x_pred: np.ndarray) -> np.ndarray:
@@ -197,8 +230,14 @@ class SVR:
             raise RuntimeError("Model has not been fitted.")
 
         x_scaled = self.scaler_x.transform(x_pred)
+        # Cross-kernel evaluation K(X_pred, X_sv) transfers the support-vector
+        # representation from the training set to the prediction points.
         phi = self._build_features(x_scaled, self.support_vectors_)
 
+        # Dual-form predictor:
+        # y_hat(x) = sum_i beta_i K(x, x_i) + b.
+        # Matrix form:
+        # Y_hat = K(X_pred, X_sv) B + b.
         y_scaled = phi @ self.dual_coef_ + self.intercept_
         y_pred = self.scaler_y.inverse_transform(y_scaled)
 
