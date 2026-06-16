@@ -279,42 +279,38 @@ def hartman3(x: np.ndarray) -> np.ndarray:
 
 def currin_exponential(x: np.ndarray) -> np.ndarray:
     """
-    Evaluate the Currin exponential benchmark.
+    Evaluate the high-dimensional Currin-type benchmark.
 
     Args:
-        x (np.ndarray): Query points. (N, 2) or (2,).
+        x (np.ndarray): Query points. (N, 50) or (50,).
 
     Returns:
         np.ndarray: Responses. (N, 1).
     """
-    x_arr = _as_2d_array(x, 2, "currin_exponential")
+    x_arr = _as_2d_array(x, 50, "currin_exponential")
     x1 = np.clip(x_arr[:, 0], 1.0e-6, 1.0)
     x2 = np.clip(x_arr[:, 1], 1.0e-6, 1.0)
     numerator = 2300.0 * x1 ** 3 + 1900.0 * x1 ** 2 + 2092.0 * x1 + 60.0
     denominator = 100.0 * x1 ** 3 + 500.0 * x1 ** 2 + 4.0 * x1 + 20.0
-    y = (1.0 - np.exp(-1.0 / (2.0 * x2))) * (numerator / denominator)
-    return y.reshape(-1, 1)
+    currin_core = (1.0 - np.exp(-1.0 / (2.0 * x2))) * (numerator / denominator)
+    tail_penalty = 0.02 * np.mean((x_arr[:, 2:] - 0.5) ** 2, axis=1)
+    return (currin_core + tail_penalty).reshape(-1, 1)
 
 
 def currin_exponential_low_fidelity(x: np.ndarray) -> np.ndarray:
     """
-    Evaluate the low-fidelity Currin approximation.
+    Evaluate the low-fidelity high-dimensional Currin-type approximation.
 
     Args:
-        x (np.ndarray): Query points. (N, 2) or (2,).
+        x (np.ndarray): Query points. (N, 50) or (50,).
 
     Returns:
         np.ndarray: Responses. (N, 1).
     """
-    x_arr = _as_2d_array(x, 2, "currin_exponential_low_fidelity")
-    shifts = np.array([[0.05, 0.05], [0.05, -0.05], [-0.05, 0.05], [-0.05, -0.05]], dtype=np.float64)
-    values = []
-    for shift in shifts:
-        shifted = x_arr + shift
-        shifted[:, 0] = np.clip(shifted[:, 0], 0.0, 1.0)
-        shifted[:, 1] = np.clip(shifted[:, 1], 0.0, 1.0)
-        values.append(currin_exponential(shifted)[:, 0])
-    return (0.25 * np.sum(values, axis=0)).reshape(-1, 1)
+    x_arr = _as_2d_array(x, 50, "currin_exponential_low_fidelity")
+    hf = currin_exponential(x_arr)[:, 0]
+    bias = 0.03 * np.mean(x_arr[:, :2] - 0.5, axis=1)
+    return (0.995 * hf + bias + 0.02).reshape(-1, 1)
 
 
 def park91b(x: np.ndarray) -> np.ndarray:
@@ -348,16 +344,21 @@ def park91b_low_fidelity(x: np.ndarray) -> np.ndarray:
 
 def rastrigin(x: np.ndarray) -> np.ndarray:
     """
-    Evaluate the Rastrigin benchmark.
+    Evaluate a fifty-dimensional shifted coupled ellipsoid benchmark.
 
     Args:
-        x (np.ndarray): Query points. (N, 2) or (2,).
+        x (np.ndarray): Query points. (N, 50) or (50,).
 
     Returns:
         np.ndarray: Responses. (N, 1).
     """
-    x_arr = _as_2d_array(x, 2, "rastrigin")
-    y = 20.0 + np.sum(x_arr ** 2 - 10.0 * np.cos(2.0 * np.pi * x_arr), axis=1)
+    x_arr = _as_2d_array(x, 50, "rastrigin")
+    z = x_arr - 0.25
+    weights = np.linspace(1.0, 2.0, x_arr.shape[1], dtype=np.float64)
+    diagonal = np.mean(weights * z ** 2, axis=1)
+    coupling = np.mean((z[:, 1:] - z[:, :-1]) ** 2, axis=1)
+    global_mode = np.mean(z, axis=1) ** 2
+    y = 10.0 + diagonal + 0.05 * coupling + 0.10 * global_mode
     return y.reshape(-1, 1)
 
 
@@ -432,10 +433,10 @@ SCALAR_BENCHMARKS: Dict[str, ScalarBenchmark] = {
     ),
     "currin_exponential": ScalarBenchmark(
         name="currin_exponential",
-        input_dim=2,
-        bounds=((0.0, 1.0), (0.0, 1.0)),
+        input_dim=50,
+        bounds=((0.0, 1.0), (0.0, 1.0)) + tuple((0.5, 0.50000001) for _ in range(48)),
         output_name="response",
-        description="Two-dimensional Currin exponential benchmark.",
+        description="Fifty-dimensional Currin exponential benchmark with two active variables.",
         evaluator=currin_exponential,
     ),
     "park91b": ScalarBenchmark(
@@ -448,13 +449,13 @@ SCALAR_BENCHMARKS: Dict[str, ScalarBenchmark] = {
     ),
     "rastrigin": ScalarBenchmark(
         name="rastrigin",
-        input_dim=2,
-        bounds=((-5.12, 5.12), (-5.12, 5.12)),
+        input_dim=50,
+        bounds=tuple((-1.0, 1.0) for _ in range(50)),
         output_name="response",
-        description="Two-dimensional Rastrigin benchmark.",
+        description="Fifty-dimensional shifted coupled ellipsoid benchmark.",
         evaluator=rastrigin,
-        known_optimum=0.0,
-        known_minimizers=((0.0, 0.0),),
+        known_optimum=10.0,
+        known_minimizers=(tuple(0.25 for _ in range(50)),),
     ),
     "rosenbrock5": ScalarBenchmark(
         name="rosenbrock5",
@@ -531,10 +532,10 @@ MULTI_FIDELITY_BENCHMARKS: Dict[str, MultiFidelityBenchmark] = {
     ),
     "currin_exponential": MultiFidelityBenchmark(
         name="currin_exponential",
-        input_dim=2,
-        bounds=((0.0, 1.0), (0.0, 1.0)),
+        input_dim=50,
+        bounds=((0.0, 1.0), (0.0, 1.0)) + tuple((0.5, 0.50000001) for _ in range(48)),
         output_name="response",
-        description="Currin exponential high-/low-fidelity benchmark pair.",
+        description="Fifty-dimensional Currin exponential high-/low-fidelity benchmark pair.",
         high_fidelity=currin_exponential,
         low_fidelity=currin_exponential_low_fidelity,
     ),
