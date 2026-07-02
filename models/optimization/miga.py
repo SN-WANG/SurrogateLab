@@ -462,10 +462,14 @@ def multi_island_genetic_optimize(
     best_x = population[best_index].copy()
     best_f = objective_vectors[best_index].copy()
     best_fun = float(objective_scalars[best_index])
+    best_violation = float(violations[best_index])
     best_energy = float(energies[best_index])
 
     message = "Maximum number of iterations reached."
     success = False
+    stall_count = 0
+    stall_limit = max(10, min(50, maxiter // 5))
+    min_converge_iter = max(5, maxiter // 4)
 
     for iteration in range(maxiter):
         # The mutation scale decays linearly with the normalized iteration ratio:
@@ -556,12 +560,21 @@ def multi_island_genetic_optimize(
 
         # The incumbent is updated by greedy energy comparison:
         #     if min_i E_i^(t+1) < E_best, then x_best <- arg min_i E_i^(t+1).
+        previous_best_energy = best_energy
+        best_energy = best_fun + penalty_factor * best_violation
         curr_best_idx = int(np.argmin(energies))
         if energies[curr_best_idx] < best_energy:
             best_x = population[curr_best_idx].copy()
             best_f = objective_vectors[curr_best_idx].copy()
             best_fun = float(objective_scalars[curr_best_idx])
+            best_violation = float(violations[curr_best_idx])
             best_energy = float(energies[curr_best_idx])
+
+        improvement = previous_best_energy - best_energy
+        if improvement > tol * max(abs(previous_best_energy), 1.0):
+            stall_count = 0
+        else:
+            stall_count += 1
 
         # Convergence is declared when the population energy spread becomes small:
         #     std(E) <= tol * max(|mean(E)|, 1).
@@ -571,12 +584,14 @@ def multi_island_genetic_optimize(
             success = True
             message = "Optimization converged."
             break
+        if best_violation <= tol and iteration + 1 >= min_converge_iter and stall_count >= stall_limit:
+            success = True
+            message = "Best feasible solution stabilized."
 
     if polish:
-        # Optional polishing solves the local penalized problem
-        #     min_x  s(x) + lambda v(x)
-        # subject to the same box/explicit constraints, using the incumbent best
-        # evolutionary solution as the local starting point.
+        # Optional polishing refines the scalarized objective subject to the same
+        # box/explicit constraints, using the incumbent best evolutionary
+        # solution as the local starting point.
         def local_objective(x_local: np.ndarray) -> float:
             values = np.atleast_1d(np.asarray(func(x_local, *args), dtype=np.float64)).reshape(-1)
             if values.size == 1:
@@ -594,9 +609,7 @@ def multi_island_genetic_optimize(
                     # where the current best objective vector plays the role of
                     # the local reference in the polishing stage.
                     value = float(np.max(local_weights * np.abs(values - best_f)))
-            # The local objective uses the same penalty form as the evolutionary
-            # phase so feasibility pressure remains consistent.
-            return value + penalty_factor * _constraint_violation(x_local, constraints, args)
+            return value
 
         # L-BFGS-B is used for pure bound constraints, while SLSQP handles the
         # explicit nonlinear/linear SciPy constraints:
@@ -615,27 +628,36 @@ def multi_island_genetic_optimize(
         # The polished point is accepted only when it improves the penalized
         # merit function:
         #     phi(x_polish) < phi(x_best).
-        if polish_result.fun < best_energy:
-            best_x = np.asarray(polish_result.x, dtype=np.float64)
-            best_f = np.atleast_1d(np.asarray(func(best_x, *args), dtype=np.float64)).reshape(-1)
-            nfev += 1
-            if best_f.size == 1:
-                best_fun = float(best_f[0])
+        polished_x = np.asarray(polish_result.x, dtype=np.float64)
+        polished_f = np.atleast_1d(np.asarray(func(polished_x, *args), dtype=np.float64)).reshape(-1)
+        nfev += 1
+        polished_violation = float(_constraint_violation(polished_x, constraints, args))
+        if polished_f.size == 1:
+            polished_fun = float(polished_f[0])
+        else:
+            local_weights = _normalize_weights(polished_f.size, objective_weights)
+            if scalarization == "weighted_sum":
+                polished_fun = float(np.dot(local_weights, polished_f))
             else:
-                local_weights = _normalize_weights(best_f.size, objective_weights)
-                if scalarization == "weighted_sum":
-                    # Keep the final reported scalar objective consistent with
-                    # the evolutionary weighted-sum aggregation.
-                    best_fun = float(np.dot(local_weights, best_f))
-                else:
-                    # For Chebyshev aggregation, the final reference is the
-                    # componentwise ideal estimate from the last population:
-                    #     z_m = min_i f_{i,m}.
-                    reference = np.min(objective_vectors, axis=0)
-                    # Final scalar score:
-                    #     s(x_best) = max_m w_m * |f_m(x_best) - z_m|.
-                    best_fun = float(np.max(local_weights * np.abs(best_f - reference)))
-            best_energy = float(polish_result.fun)
+                reference = np.min(objective_vectors, axis=0)
+                polished_fun = float(np.max(local_weights * np.abs(polished_f - reference)))
+        polished_energy = polished_fun + penalty_factor * polished_violation
+
+        if polished_energy < best_energy:
+            best_x = polished_x
+            best_f = polished_f
+            best_fun = polished_fun
+            best_violation = polished_violation
+            best_energy = polished_energy
+
+        if polish_result.success and best_violation <= tol:
+            success = True
+            message = "Optimization converged after polishing."
+
+    final_violation = float(_constraint_violation(best_x, constraints, args))
+    if not success and final_violation <= tol:
+        success = True
+        message = "Maximum iterations reached with feasible incumbent."
 
     # Assemble a SciPy-like result object that exposes both the best incumbent
     # and the final evolutionary population state for downstream analysis.
@@ -649,7 +671,7 @@ def multi_island_genetic_optimize(
     result.population = population.copy()
     result.population_energies = energies.copy()
     result.objective_vector = best_f.copy()
-    result.constraint_violation = float(_constraint_violation(best_x, constraints, args))
+    result.constraint_violation = final_violation
     result.penalized_fun = best_energy
     result.optimizer = "MIGA"
 

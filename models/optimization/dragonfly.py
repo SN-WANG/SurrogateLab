@@ -243,6 +243,7 @@ def _update_population(
     # Delta_max = 0.2 * (u - l),
     # which keeps the flight increment inside a controlled fraction of the box span.
     max_step = 0.2 * span
+    acceleration_limit = 0.25 * max_step
     new_population = population.copy()
     new_delta_x = delta_x.copy()
     max_fit_g = float(np.max(fit_g))
@@ -272,9 +273,10 @@ def _update_population(
 
         # Quadratic drag model:
         # F_d = -(1 / 2) C_d rho A ||Delta x_i|| Delta x_i,
-        # a_d = F_d / g_i.
+        # a_d = F_d / g_i, capped because g_i is a normalized swarm mass.
         drag_force = -0.5 * drag_coefficient * air_density * block_area * speed * delta_x[i]
         drag_acceleration = drag_force / (fit_g[i] + 1e-12)
+        drag_acceleration = np.clip(drag_acceleration, -acceleration_limit, acceleration_limit)
 
         # Cohesion is weakened by a large blocking area:
         # s_coh = max(s_coh,min, 1 - A / A_max).
@@ -318,6 +320,7 @@ def _update_population(
             rng=rng,
         )
         acceleration = force / (fit_g[i] + 1e-12)
+        acceleration = np.clip(acceleration, -acceleration_limit, acceleration_limit)
 
         # The full CFARSSDA velocity-like update is
         # Delta x_i^(t+1) = eta_t [
@@ -525,10 +528,14 @@ def dragonfly_optimize(
     best_x = population[best_idx].copy()
     best_f = objective_vectors[best_idx].copy()
     best_fun = float(objective_scalars[best_idx])
+    best_violation = float(violations[best_idx])
     best_energy = float(energies[best_idx])
 
     message = "Maximum number of iterations reached."
     success = False
+    stall_count = 0
+    stall_limit = max(10, min(50, maxiter // 5))
+    min_converge_iter = max(5, maxiter // 4)
 
     for iteration in range(maxiter):
         # Use the normalized iteration ratio
@@ -645,12 +652,30 @@ def dragonfly_optimize(
             _append_archive(archive_x, archive_f, archive_v, population, objective_vectors, violations)
 
         # Keep the incumbent minimizer of the penalized merit E(x).
+        previous_best_energy = best_energy
+        best_energy = best_fun + penalty_factor * best_violation
         curr_best_idx = int(np.argmin(energies))
         if energies[curr_best_idx] < best_energy:
             best_x = population[curr_best_idx].copy()
             best_f = objective_vectors[curr_best_idx].copy()
             best_fun = float(objective_scalars[curr_best_idx])
+            best_violation = float(violations[curr_best_idx])
             best_energy = float(energies[curr_best_idx])
+
+        improvement = previous_best_energy - best_energy
+        if improvement > tol * max(abs(previous_best_energy), 1.0):
+            stall_count = 0
+        else:
+            stall_count += 1
+
+        worst_idx = int(np.argmax(energies))
+        if best_energy < energies[worst_idx]:
+            population[worst_idx] = best_x.copy()
+            delta_x[worst_idx] = 0.0
+            objective_vectors[worst_idx] = best_f.copy()
+            objective_scalars[worst_idx] = best_fun
+            violations[worst_idx] = best_violation
+            energies[worst_idx] = best_energy
 
         # Convergence is declared when the population energy spread satisfies
         # std(E) <= tol * max(|mean(E)|, 1),
@@ -659,13 +684,13 @@ def dragonfly_optimize(
             success = True
             message = "Optimization converged."
             break
+        if best_violation <= tol and iteration + 1 >= min_converge_iter and stall_count >= stall_limit:
+            success = True
+            message = "Best feasible solution stabilized."
 
     if polish:
 
         def local_objective(x_local: np.ndarray) -> float:
-            # Local refinement solves the same penalized merit function
-            # Phi(x) = s(x) + lambda v(x),
-            # so the polish stage stays consistent with the global search target.
             values = np.atleast_1d(np.asarray(func(x_local, *args), dtype=np.float64)).reshape(-1)
             if values.size == 1:
                 value = float(values[0])
@@ -681,10 +706,9 @@ def dragonfly_optimize(
                     # with z_k^* taken from the current population minimum.
                     reference = np.min(objective_vectors, axis=0)
                     value = float(np.max(local_weights * np.abs(values - reference)))
-            return value + penalty_factor * _constraint_violation(x_local, constraints, args)
+            return value
 
-        # Use box-only L-BFGS-B when unconstrained, otherwise switch to SLSQP
-        # to minimize Phi(x) subject to the provided constraints.
+        # Use box-only L-BFGS-B when unconstrained, otherwise switch to SLSQP.
         polish_method = "L-BFGS-B" if not constraints else "SLSQP"
         polish_result = minimize(
             local_objective,
@@ -694,24 +718,36 @@ def dragonfly_optimize(
             constraints=constraints if constraints else (),
         )
         nfev += int(getattr(polish_result, "nfev", 0))
-        if polish_result.fun < best_energy:
-            # Accept the polished candidate only if it improves the penalized merit value.
-            best_x = np.asarray(polish_result.x, dtype=np.float64)
-            best_f = np.atleast_1d(np.asarray(func(best_x, *args), dtype=np.float64)).reshape(-1)
-            nfev += 1
-            if best_f.size == 1:
-                best_fun = float(best_f[0])
+        polished_x = np.asarray(polish_result.x, dtype=np.float64)
+        polished_f = np.atleast_1d(np.asarray(func(polished_x, *args), dtype=np.float64)).reshape(-1)
+        nfev += 1
+        polished_violation = float(_constraint_violation(polished_x, constraints, args))
+        if polished_f.size == 1:
+            polished_fun = float(polished_f[0])
+        else:
+            local_weights = _normalize_weights(polished_f.size, objective_weights)
+            if scalarization == "weighted_sum":
+                polished_fun = float(np.dot(local_weights, polished_f))
             else:
-                local_weights = _normalize_weights(best_f.size, objective_weights)
-                if scalarization == "weighted_sum":
-                    # Reconstruct the reported scalar value with s(x) = w^T f(x).
-                    best_fun = float(np.dot(local_weights, best_f))
-                else:
-                    # Reconstruct the reported scalar value with
-                    # s(x) = max_k w_k |f_k(x) - z_k^*|.
-                    reference = np.min(objective_vectors, axis=0)
-                    best_fun = float(np.max(local_weights * np.abs(best_f - reference)))
-            best_energy = float(polish_result.fun)
+                reference = np.min(objective_vectors, axis=0)
+                polished_fun = float(np.max(local_weights * np.abs(polished_f - reference)))
+        polished_energy = polished_fun + penalty_factor * polished_violation
+
+        if polished_energy < best_energy:
+            best_x = polished_x
+            best_f = polished_f
+            best_fun = polished_fun
+            best_violation = polished_violation
+            best_energy = polished_energy
+
+        if polish_result.success and best_violation <= tol:
+            success = True
+            message = "Optimization converged after polishing."
+
+    final_violation = float(_constraint_violation(best_x, constraints, args))
+    if not success and final_violation <= tol:
+        success = True
+        message = "Maximum iterations reached with feasible incumbent."
 
     # Package both the physical swarm state and the optimization summary
     # so downstream code can reuse the final population and Pareto archive.
@@ -725,7 +761,7 @@ def dragonfly_optimize(
     result.population = population.copy()
     result.population_energies = energies.copy()
     result.objective_vector = best_f.copy()
-    result.constraint_violation = float(_constraint_violation(best_x, constraints, args))
+    result.constraint_violation = final_violation
     result.penalized_fun = best_energy
     result.optimizer = "CFARSSDA"
 
