@@ -41,11 +41,11 @@ TARGET_SPECS = OrderedDict(
 
 DESIGN_SPACE = {
     "num_features": 3,
-    "num_outputs": 4,
+    "num_outputs": 5,
     "bounds_lower": [4.0, 4.0, 4.0],
     "bounds_upper": [10.0, 10.0, 10.0],
     "input_names": ["thick1", "thick2", "thick3"],
-    "output_names": ["weight", "displacement", "stress_skin", "stress_stiff"],
+    "output_names": ["weight", "displacement", "stress_skin", "stress_stiff", "inner_temperature"],
 }
 
 

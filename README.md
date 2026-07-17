@@ -48,6 +48,8 @@ accuracy = (1 - sum(|GT - Pred|) / (sum(|GT|) + eps)) * 100%
 
 ### Engineering Case Suite
 
+- External solver: Abaqus 2022 through the `abq2022` command on `PATH`
+- Raw responses: `weight`, `displacement`, `stress_skin`, `stress_stiff`, and `inner_temperature`
 - Engineering targets: `weight` and `stress_skin`
 - 4 ensemble validation runs
 - 6 multi-fidelity validation runs
@@ -108,7 +110,19 @@ This writes `bench_results.json` to the repository root.
 python case_main.py
 ```
 
+The engineering workflow requires a callable external `abq2022` executable. It fails immediately when Abaqus is not
+available; there is no local proxy fallback.
+
 This writes `case_doe_cache.npy` and `case_results.json` to the repository root.
+
+### Run the unified quality gate
+
+```bash
+python main.py
+```
+
+The quality gate executes `case_main.py` before `bench_main.py`, so it has the same Abaqus requirement as the
+engineering workflow.
 
 ### Run only the active-learning demos
 

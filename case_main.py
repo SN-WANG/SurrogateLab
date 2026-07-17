@@ -12,12 +12,6 @@ import numpy as np
 from scipy.optimize import NonlinearConstraint
 
 import case_config
-
-try:
-    from wing_structure_simulation import AbaqusModel as _ExternalAbaqusModel
-except ImportError:
-    _ExternalAbaqusModel = None
-
 from models.classical.krg import KRG
 from models.classical.prs import PRS
 from models.classical.rbf import RBF
@@ -33,186 +27,40 @@ from sampling.diso_infill import DISOInfill
 from sampling.doe import lhs_design
 from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
+from wing_structure_simulation import AbaqusModel
 
 
 # ============================================================
-# Runtime Backends
+# External Solver
 # ============================================================
 
-def proxy_branin(x1: float, x2: float) -> float:
+def require_external_solver() -> Dict[str, str]:
     """
-    Evaluate the analytic proxy Branin surface used by the local case model.
-
-    Args:
-        x1 (float): First design variable.
-        x2 (float): Second design variable.
+    Require the configured external Abaqus command.
 
     Returns:
-        float: Proxy surface value.
-    """
-    a = 1.0
-    b = 5.1 / (4.0 * np.pi ** 2)
-    c = 5.0 / np.pi
-    r = 6.0
-    s = 10.0
-    t = 1.0 / (8.0 * np.pi)
-    return a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1.0 - t) * np.cos(x1) + s
+        Dict[str, str]: External solver metadata.
 
-class _LocalProxyAbaqusModel:
+    Raises:
+        RuntimeError: If the Abaqus command is unavailable.
     """
-    Local analytic proxy for engineering validation without Abaqus.
+    command_name = AbaqusModel.command_name
+    if shutil.which(command_name) is None:
+        raise RuntimeError(
+            f"External Abaqus solver '{command_name}' was not found on PATH. "
+            "Install or expose Abaqus 2022 before running the engineering workflow."
+        )
+    return {"solver": "abaqus", "command_name": command_name}
+
+
+def log_case_runtime(runtime: Dict[str, str]) -> None:
+    """
+    Log the external engineering solver.
 
     Args:
-        fidelity (str): Simulation fidelity, "high" or "low".
+        runtime (Dict[str, str]): External solver metadata.
     """
-
-    def __init__(self, fidelity: str = "high") -> None:
-        self.fidelity = fidelity
-        self.input_vars = ["thick1", "thick2", "thick3"]
-        self.output_vars = ["weight", "displacement", "stress_skin", "stress_stiff"]
-
-    def run(self, input_arr: np.ndarray) -> np.ndarray:
-        """
-        Execute one Abaqus-style simulation.
-
-        Args:
-            input_arr (np.ndarray): Design vector. (D,).
-
-        Returns:
-            np.ndarray: Structural responses. (4,).
-        """
-        x = np.asarray(input_arr, dtype=np.float64).reshape(-1)
-
-        y_weight = (proxy_branin(x[0], x[1]) + 2.0 * x[2]) / 300.0
-        y_displacement = 0.5 * x[0] ** 2 + 1.2 * x[1] + np.sin(x[2])
-        y_stress_skin = proxy_branin(x[1], x[2]) + 0.8 * x[0]
-        y_stress_stiff = (x[0] - 5.0) ** 2 + (x[1] - 5.0) ** 2 + (x[2] - 5.0) ** 2
-        y = np.array([y_weight, y_displacement, y_stress_skin, y_stress_stiff], dtype=np.float64)
-
-        if self.fidelity == "low":
-            bias = np.array([0.003, 5.0, 5.0, 5.0], dtype=np.float64)
-            noise = np.array([1.0e-4, 0.1, 0.1, 0.1], dtype=np.float64)
-            y = 0.85 * y + bias + np.random.normal(0.0, noise, size=y.shape)
-
-        return y
-
-
-class _ExternalAbaqusModelAdapter:
-    """
-    Workspace-aware wrapper around the external Abaqus solver interface.
-
-    Args:
-        fidelity (str): Simulation fidelity, "high" or "low".
-    """
-
-    def __init__(self, fidelity: str = "high") -> None:
-        self.model = _ExternalAbaqusModel(fidelity=fidelity)
-        self.input_vars = list(self.model.input_vars)
-        self.output_vars = list(self.model.output_vars)
-
-    def run(self, input_arr: np.ndarray) -> np.ndarray:
-        """
-        Execute one Abaqus simulation from the SurrogateLab root.
-
-        Args:
-            input_arr (np.ndarray): Design vector. (D,).
-
-        Returns:
-            np.ndarray: Structural responses. (4,).
-        """
-        current_dir = os.getcwd()
-        os.chdir(os.path.dirname(os.path.abspath(__file__)))
-        try:
-            return self.model.run(input_arr)
-        finally:
-            os.chdir(current_dir)
-
-
-def _get_external_abaqus_command() -> str | None:
-    if _ExternalAbaqusModel is None:
-        return None
-    return _ExternalAbaqusModel().abaqus_cmd.split()[0]
-
-
-def get_case_runtime() -> Dict[str, Any]:
-    """
-    Detect the available Abaqus runtime backend.
-
-    Returns:
-        Dict[str, Any]: Runtime status for solver selection and reporting.
-    """
-    if hasattr(get_case_runtime, "_cache"):
-        return get_case_runtime._cache
-
-    command_name = _get_external_abaqus_command()
-    interface_available = _ExternalAbaqusModel is not None
-    command_available = command_name is not None and shutil.which(command_name) is not None
-    available = interface_available and command_available
-    backend = "EXTERNAL_SOLVER" if available else "LOCAL_PROXY"
-
-    get_case_runtime._cache = {
-        "solver": "abaqus",
-        "interface_available": interface_available,
-        "command_name": command_name,
-        "command_available": command_available,
-        "available": available,
-        "backend": backend,
-    }
-    return get_case_runtime._cache
-
-
-get_abaqus_runtime = get_case_runtime
-
-
-def log_case_runtime(runtime: Dict[str, Any]) -> None:
-    """
-    Print a high-visibility Abaqus runtime banner.
-
-    Args:
-        runtime (Dict[str, Any]): Runtime status returned by get_case_runtime.
-    """
-    line = "=" * 78
-    availability_color = hue.g if runtime["available"] else hue.r
-    command_name = runtime["command_name"] if runtime["command_name"] is not None else "N/A"
-    logger.info(line)
-    logger.info(f"{hue.b}SIMULATION INTERFACE  : {hue.c}{str(runtime['interface_available']).upper()}{hue.q}")
-    logger.info(f"{hue.b}ABAQUS COMMAND        : {hue.m}{command_name}{hue.q}")
-    logger.info(f"{hue.b}ABAQUS COMMAND FOUND  : {hue.c}{str(runtime['command_available']).upper()}{hue.q}")
-    logger.info(f"{hue.b}ABAQUS AVAILABILITY   : {availability_color}{str(runtime['available']).upper()}{hue.q}")
-    logger.info(f"{hue.b}SOLVER BACKEND        : {hue.m}{runtime['backend']}{hue.q}")
-    logger.info(line)
-
-
-log_abaqus_runtime = log_case_runtime
-
-
-class AbaqusModel:
-    """
-    Runtime-selecting engineering solver wrapper.
-
-    Args:
-        fidelity (str): Simulation fidelity, "high" or "low".
-    """
-
-    def __init__(self, fidelity: str = "high") -> None:
-        runtime = get_case_runtime()
-        model_cls = _ExternalAbaqusModelAdapter if runtime["available"] else _LocalProxyAbaqusModel
-        self.backend = runtime["backend"]
-        self.model = model_cls(fidelity=fidelity)
-        self.input_vars = list(self.model.input_vars)
-        self.output_vars = list(self.model.output_vars)
-
-    def run(self, input_arr: np.ndarray) -> np.ndarray:
-        """
-        Execute one engineering simulation.
-
-        Args:
-            input_arr (np.ndarray): Design vector. (D,).
-
-        Returns:
-            np.ndarray: Structural responses. (4,).
-        """
-        return self.model.run(input_arr)
+    logger.info(f"{hue.b}Case solver: {hue.m}{runtime['solver']} ({runtime['command_name']}){hue.q}")
 
 
 # ============================================================
@@ -266,7 +114,7 @@ def run_abaqus_batch(x: np.ndarray, fidelity: str = "high") -> np.ndarray:
         fidelity (str): Simulation fidelity.
 
     Returns:
-        np.ndarray: Response matrix. (N, 4).
+        np.ndarray: Response matrix. (N, 5).
     """
     model = AbaqusModel(fidelity=fidelity)
     return np.vstack([model.run(x[i]) for i in range(x.shape[0])])
@@ -457,22 +305,22 @@ def get_target_specs(args: Any) -> List[Dict[str, Any]]:
     return specs
 
 
-def build_cache_meta(args: Any, runtime: Dict[str, Any]) -> Dict[str, Any]:
+def build_cache_meta(args: Any) -> Dict[str, Any]:
     """
     Build the signature stored inside the unified case DOE cache.
 
     Args:
         args (Any): Parsed arguments.
-        runtime (Dict[str, Any]): Runtime backend metadata.
 
     Returns:
         Dict[str, Any]: Cache metadata signature.
     """
     return {
-        "backend": runtime["backend"],
         "doe_seed": args.doe_seed,
         "num_features": args.num_features,
         "num_outputs": args.num_outputs,
+        "input_names": list(args.input_names),
+        "output_names": list(args.output_names),
         "bounds": args.bounds.tolist(),
         "num_train": args.num_train,
         "num_test": args.num_test,
@@ -491,8 +339,8 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
     Returns:
         Dict[str, np.ndarray]: Cached engineering data.
     """
-    runtime = get_case_runtime()
-    meta = build_cache_meta(args, runtime)
+    require_external_solver()
+    meta = build_cache_meta(args)
     cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "case_doe_cache.npy")
 
     if os.path.isfile(cache_path):
@@ -762,10 +610,13 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
     """
     objective_idx = case_config.TARGET_SPECS[args.opt_target]["output_idx"]
     constraint_idx = case_config.TARGET_SPECS[args.opt_constraint_target]["output_idx"]
-    model = fit_krg(data["x_train"], data["y_train"], args)
-    x0 = data["x_train"][np.argmin(data["y_train"][:, objective_idx])]
-    objective = partial(predict_scalar_output, model, objective_idx)
-    constraint_fun = partial(predict_scalar_output, model, constraint_idx)
+    y_objective = select_output(data["y_train"], objective_idx)
+    y_constraint = select_output(data["y_train"], constraint_idx)
+    objective_model = fit_krg(data["x_train"], y_objective, args)
+    constraint_model = fit_krg(data["x_train"], y_constraint, args)
+    x0 = data["x_train"][np.argmin(y_objective[:, 0])]
+    objective = partial(predict_scalar_output, objective_model, 0)
+    constraint_fun = partial(predict_scalar_output, constraint_model, 0)
     constraint = NonlinearConstraint(fun=constraint_fun, lb=-np.inf, ub=args.opt_constraint_ub)
 
     optimizers = {
@@ -919,7 +770,7 @@ def run_case(args: Any) -> Dict[str, Any]:
     """
     seed_everything(args.seed)
     reset_random_state(args.seed)
-    runtime = get_case_runtime()
+    runtime = require_external_solver()
 
     logger.info(f"{hue.b}SurrogateLab Case Workflow{hue.q}")
     log_case_runtime(runtime)

@@ -23,16 +23,24 @@ from visualization import *
 from connectorBehavior import *
 import numpy as np
 from odbAccess import openOdb
-# >>> 修改点1：引入必要的库 <<<
 import os
 import time
 
 openMdb(pathName='wing_structure_model.cae')
+model = mdb.models['Model-1']
 ###############################################################################
-###############              定义设计变量：不同分区的蒙皮厚度              ##############################
-thick1=6.0529
-thick2=7.3003
-thick3=5.1129
+###############              定义设计变量：热防护层厚度              ##############################
+# SiC、Aerogel、Ti65 三层厚度，从内表面到外表面排列
+thick1=4.0000
+thick2=8.0000
+thick3=8.0000
+
+hot_gas_temperature = 1000.0
+inner_air_temperature = 25.0
+outer_film_coefficient = 0.05
+inner_film_coefficient = 0.01
+temperature_increment_limit = 1000.0
+inner_temperature_output_key = 'NT11'
 ###############################################################################
 # 定义载荷点，1为最前一个参考点，3为最后一个
 loadCases = 3
@@ -51,21 +59,69 @@ sleepTime = 0.001
 # reSketchOrigin(0,0,0,-400,0,0,0)
 # reSketchOrigin(0,0,0,0,300,0,0)
 # reSketchOrigin(0,0,0,0,0,-600,0)
-mdb.models['Model-1'].sections['Section-2'].setValues(preIntegrate=OFF,
-                                                      material='Material-1', thicknessType=UNIFORM, thickness=thick1,
-                                                      thicknessField='', idealization=NO_IDEALIZATION,
-                                                      integrationRule=SIMPSON,
-                                                      numIntPts=5)
-mdb.models['Model-1'].sections['Section-3'].setValues(preIntegrate=OFF,
-                                                      material='Material-1', thicknessType=UNIFORM, thickness=thick2,
-                                                      thicknessField='', idealization=NO_IDEALIZATION,
-                                                      integrationRule=SIMPSON,
-                                                      numIntPts=5)
-mdb.models['Model-1'].sections['Section-5'].setValues(preIntegrate=OFF,
-                                                      material='Material-1', thicknessType=UNIFORM, thickness=thick3,
-                                                      thicknessField='', idealization=NO_IDEALIZATION,
-                                                      integrationRule=SIMPSON,
-                                                      numIntPts=5)
+
+
+def define_materials():
+    """Create the thermal-protection materials and thermal structure data."""
+    if 'Material-1' in model.materials.keys():
+        model.materials['Material-1'].Conductivity(table=((167.0,),))
+        model.materials['Material-1'].SpecificHeat(table=((896.0,),))
+        model.materials['Material-1'].Expansion(table=((23.0e-6,),))
+
+    if 'SiC' not in model.materials.keys():
+        model.Material(name='SiC')
+    model.materials['SiC'].Elastic(table=((420000.0, 0.17),))
+    model.materials['SiC'].Density(table=((3.1e-9,),))
+    model.materials['SiC'].Conductivity(table=((10.0,),))
+    model.materials['SiC'].SpecificHeat(table=((750.0,),))
+    model.materials['SiC'].Expansion(table=((4.0e-6,),))
+
+    if 'Aerogel' not in model.materials.keys():
+        model.Material(name='Aerogel')
+    model.materials['Aerogel'].Elastic(table=((500.0, 0.2),))
+    model.materials['Aerogel'].Density(table=((0.2e-9,),))
+    model.materials['Aerogel'].Conductivity(table=((0.04,),))
+    model.materials['Aerogel'].SpecificHeat(table=((1000.0,),))
+    model.materials['Aerogel'].Expansion(table=((5.0e-6,),))
+
+    if 'Ti65' not in model.materials.keys():
+        model.Material(name='Ti65')
+    model.materials['Ti65'].Elastic(table=((110000.0, 0.34),))
+    model.materials['Ti65'].Density(table=((4.5e-9,),))
+    model.materials['Ti65'].Conductivity(table=((7.0,),))
+    model.materials['Ti65'].SpecificHeat(table=((560.0,),))
+    model.materials['Ti65'].Expansion(table=((9.0e-6,),))
+
+
+def define_tps_skin_section():
+    """Create the SiC-Aerogel-Ti65 composite shell section."""
+    section_name = 'TPS-Skin-Section'
+    if section_name in model.sections.keys():
+        del model.sections[section_name]
+
+    model.CompositeShellSection(
+        name=section_name,
+        preIntegrate=OFF,
+        idealization=NO_IDEALIZATION,
+        symmetric=False,
+        thicknessType=UNIFORM,
+        poissonDefinition=DEFAULT,
+        thicknessModulus=None,
+        temperature=GRADIENT,
+        useDensity=OFF,
+        integrationRule=SIMPSON,
+        layup=(
+            SectionLayer(material='SiC', thickness=thick1, orientAngle=0.0,
+                         numIntPts=3, plyName='SiC_inner'),
+            SectionLayer(material='Aerogel', thickness=thick2, orientAngle=0.0,
+                         numIntPts=3, plyName='Aerogel_mid'),
+            SectionLayer(material='Ti65', thickness=thick3, orientAngle=0.0,
+                         numIntPts=3, plyName='Ti65_outer'),
+        ))
+
+
+define_materials()
+define_tps_skin_section()
 position1 = [5000, 3000, 1500, 0, -1500, -3000, -5000]
 position2 = [-2500, -318.18181818199, 1318.18181818173, 3000]
 
@@ -226,6 +282,9 @@ for i in p.faces:
         outterFaces = outterFaces + f[i.index:i.index + 1]
 
 p.Set(faces=outterFaces, name='allOutterFaces')
+p.SectionAssignment(region=p.sets['allOutterFaces'], sectionName='TPS-Skin-Section',
+                    offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='',
+                    thicknessAssignment=FROM_SECTION)
 
 for i in p.faces:
     feature = i.featureName
@@ -252,6 +311,68 @@ p.Set(faces=bdSurfaces, name='bdSurfaces')
 a = mdb.models['Model-1'].rootAssembly
 a.regenerate()
 a.Instance(name='Part-1-1', part=p, dependent=ON)
+
+
+def define_thermo_mechanical_step():
+    """Create the coupled temperature-displacement step and field output."""
+    step_name = 'Step-ThermoMechanical'
+    if step_name not in model.steps.keys():
+        model.CoupledTempDisplacementStep(name=step_name, previous='Step-1',
+                                          timePeriod=1.0, nlgeom=OFF,
+                                          deltmx=temperature_increment_limit)
+
+    if 'F-Output-Thermal' in model.fieldOutputRequests.keys():
+        model.fieldOutputRequests['F-Output-Thermal'].setValues(variables=('S', 'U', 'NT'))
+    else:
+        model.FieldOutputRequest(name='F-Output-Thermal', createStepName=step_name,
+                                 variables=('S', 'U', 'NT'))
+
+
+def define_thermal_loads():
+    """Apply the initial temperature and inner/outer convection conditions."""
+    step_name = 'Step-ThermoMechanical'
+    inst = a.instances['Part-1-1']
+    skin_faces = inst.sets['allOutterFaces'].faces
+
+    for surface_name in ('TPS-Outer-Surface', 'TPS-Inner-Surface'):
+        if surface_name in a.surfaces.keys():
+            del a.surfaces[surface_name]
+    a.Surface(side1Faces=skin_faces, name='TPS-Outer-Surface')
+    a.Surface(side2Faces=skin_faces, name='TPS-Inner-Surface')
+
+    if 'AllFaces-InitialTemperature' in a.sets.keys():
+        del a.sets['AllFaces-InitialTemperature']
+    a.Set(faces=inst.faces, name='AllFaces-InitialTemperature')
+
+    if 'Initial-Temperature' in model.predefinedFields.keys():
+        del model.predefinedFields['Initial-Temperature']
+    model.Temperature(name='Initial-Temperature', createStepName='Initial',
+                      region=a.sets['AllFaces-InitialTemperature'],
+                      distributionType=UNIFORM,
+                      crossSectionDistribution=CONSTANT_THROUGH_THICKNESS,
+                      magnitudes=(inner_air_temperature,))
+
+    for interaction_name in ('Outer-Convection', 'Inner-Convection'):
+        if interaction_name in model.interactions.keys():
+            del model.interactions[interaction_name]
+
+    model.FilmCondition(name='Outer-Convection', createStepName=step_name,
+                        surface=a.surfaces['TPS-Outer-Surface'],
+                        definition=EMBEDDED_COEFF,
+                        filmCoeff=outer_film_coefficient,
+                        filmCoeffAmplitude='',
+                        sinkTemperature=hot_gas_temperature,
+                        sinkAmplitude='',
+                        sinkDistributionType=UNIFORM)
+
+    model.FilmCondition(name='Inner-Convection', createStepName=step_name,
+                        surface=a.surfaces['TPS-Inner-Surface'],
+                        definition=EMBEDDED_COEFF,
+                        filmCoeff=inner_film_coefficient,
+                        filmCoeffAmplitude='',
+                        sinkTemperature=inner_air_temperature,
+                        sinkAmplitude='',
+                        sinkDistributionType=UNIFORM)
 
 
 def defineStringer():
@@ -361,6 +482,8 @@ def defineSet():
 
 ###############################################################################################################
 defineSet()
+define_thermo_mechanical_step()
+define_thermal_loads()
 # defineStringer()
 ###########################################################################################################
 ############################################################################
@@ -412,9 +535,9 @@ a.Set(referencePoints=(refPoint,), name='Set-refPoint')
 
 
 # 划分网格
-elemType1 = mesh.ElemType(elemCode=S4, elemLibrary=STANDARD,
+elemType1 = mesh.ElemType(elemCode=S4T, elemLibrary=STANDARD,
                           secondOrderAccuracy=OFF)
-elemType2 = mesh.ElemType(elemCode=S3, elemLibrary=STANDARD)
+elemType2 = mesh.ElemType(elemCode=S3T, elemLibrary=STANDARD)
 p = mdb.models['Model-1'].parts['Part-1']
 f = p.faces
 faces = f[:]
@@ -423,46 +546,26 @@ p.setElementType(regions=pickedRegions, elemTypes=(elemType1, elemType2))
 p.seedPart(size=meshSize, deviationFactor=0.1, minSizeFactor=0.1)
 p.generateMesh()
 
-# >>> 修改点2：替换为改良版的 submitJob (防止删 weight.txt) <<<
 name = 'loadcases%s-stiffNum' % (loadCases)
 for i in num:
     name = name + '-' + str(i)
 
 
 def submitJob(name):
-    extensions = ['.odb', '.lck', '.sta', '.msg', '.log', '.dat', '.com', '.sim', '.prt', '.ipm']
-    # 排除 weight.txt，只删仿真结果
-    result_files = ['Displacement.txt', 'Mises-outterFaces.txt',
-                    'Mises-originStiff.txt', 'Mises-allReinforcedStiff.txt']
-
-    print('Checking for old files to clean...')
-    for ext in extensions:
-        filename = name + ext
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except:
-                pass
-
-    for txt_file in result_files:
-        if os.path.exists(txt_file):
-            try:
-                os.remove(txt_file)
-            except:
-                pass
-
-    # >>> 修改点：将 numCpus 和 numDomains 从 6 改为 4 (或者 2) <<<
     mdb.Job(name=name, model='Model-1', description='', type=ANALYSIS,
             atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90,
             memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True,
             explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF,
             modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='',
             scratch='', resultsFormat=ODB, multiprocessingMode=DEFAULT,
-            numCpus=4, numDomains=4, numGPUs=0)  # <--- 这里改成了 4
+            numCpus=4, numDomains=4, numGPUs=0)
 
     print("Job submitted. Waiting for completion inside Abaqus...")
-    mdb.jobs[name].submit(consistencyChecking=OFF)
-    mdb.jobs[name].waitForCompletion()
+    job = mdb.jobs[name]
+    job.submit(consistencyChecking=OFF)
+    job.waitForCompletion()
+    if job.status != COMPLETED:
+        raise RuntimeError("Abaqus job %s finished with status %s." % (name, job.status))
 
 
 def GetWeight():
@@ -476,65 +579,67 @@ def GetWeight():
 
 
 def maxMisesDis(name):
-    stress = []
-    maxValue = 0
+    """Write the four structural responses and the NT11 inner temperature."""
     odb = openOdb(name + '.odb')
-    step = odb.steps['Step-1']
-    frame = step.frames[-1]
-    allField = odb.steps['Step-1'].frames[-1].fieldOutputs
+    try:
+        frame = odb.steps['Step-ThermoMechanical'].frames[-1]
+        allField = frame.fieldOutputs
+        instance = odb.rootAssembly.instances['PART-1-1']
 
-    # --- 修复开始：位移提取 ---
-    # 位移
-    stressSet = allField['U'].getSubset(region=odb.rootAssembly.instances['PART-1-1'])
-    for stressValue in stressSet.values:
-        # 使用 .magnitude 获取合位移（模长），这是 Abaqus 标准写法
-        # 如果你原来的意图是取三个方向绝对值的最大值，应该用 max(map(abs, stressValue.data))
-        # 但通常工程上都是看合位移 magnitude
-        if stressValue.magnitude:
-            stress.append(stressValue.magnitude)
-        else:
-            stress.append(0.0)
-
-    maxValue = max(stress)
-    outfile_name = open('Displacement.txt', 'w')
-    outfile_name.write('%f \n' % maxValue)
-    outfile_name.close()
-    # --- 修复结束 ---
-
-    # 蒙皮
-    stress = []
-    stressSet = allField['S'].getSubset(region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLOUTTERFACES'])
-    for stressValue in stressSet.values:
-        stress.append(stressValue.mises)
-
-    maxValue = max(stress)
-    outfile_name = open('Mises-outterFaces.txt', 'w')
-    outfile_name.write('%f \n' % maxValue)
-    outfile_name.close()
-    # 初始加筋
-    stress = []
-    stressSet = allField['S'].getSubset(region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLORIGINSTIFF'])
-    for stressValue in stressSet.values:
-        stress.append(stressValue.mises)
-
-    maxValue = max(stress)
-    outfile_name = open('Mises-originStiff.txt', 'w')
-    outfile_name.write('%f \n' % maxValue)
-    outfile_name.close()
-    # 后加墙
-    if num.count(0) != 9:
-        stress = []
-        stressSet = allField['S'].getSubset(
-            region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLREINFORCEDSTIFF'])
-        for stressValue in stressSet.values:
-            stress.append(stressValue.mises)
-
-        maxValue = max(stress)
-        outfile_name = open('Mises-allReinforcedStiff.txt', 'w')
-        outfile_name.write('%f \n' % maxValue)
+        displacement = [value.magnitude for value in allField['U'].getSubset(region=instance).values]
+        outfile_name = open('Displacement.txt', 'w')
+        outfile_name.write('%f \n' % max(displacement))
         outfile_name.close()
-    odb.close()
-    return
+
+        skin_stress = allField['S'].getSubset(region=instance.elementSets['ALLOUTTERFACES'])
+        outfile_name = open('Mises-outterFaces.txt', 'w')
+        outfile_name.write('%f \n' % max([value.mises for value in skin_stress.values]))
+        outfile_name.close()
+
+        stiff_stress = allField['S'].getSubset(region=instance.elementSets['ALLORIGINSTIFF'])
+        outfile_name = open('Mises-originStiff.txt', 'w')
+        outfile_name.write('%f \n' % max([value.mises for value in stiff_stress.values]))
+        outfile_name.close()
+
+        if num.count(0) != 9:
+            reinforced_stress = allField['S'].getSubset(region=instance.elementSets['ALLREINFORCEDSTIFF'])
+            outfile_name = open('Mises-allReinforcedStiff.txt', 'w')
+            outfile_name.write('%f \n' % max([value.mises for value in reinforced_stress.values]))
+            outfile_name.close()
+
+        skin_node_labels = set()
+        for element in instance.elementSets['ALLOUTTERFACES'].elements:
+            for node_label in element.connectivity:
+                skin_node_labels.add(node_label)
+
+        stiff_node_labels = set()
+        stiff_set_names = ('ALLORIGINSTIFF', 'ALLLONGSTIFF', 'ALLTRANSTIFF', 'ALLREINFORCEDSTIFF')
+        for set_name in stiff_set_names:
+            if set_name in instance.elementSets.keys():
+                for element in instance.elementSets[set_name].elements:
+                    for node_label in element.connectivity:
+                        stiff_node_labels.add(node_label)
+
+        inner_temperature = []
+        shared_temperature = []
+        for value in allField[inner_temperature_output_key].values:
+            node_label = getattr(value, 'nodeLabel', None)
+            if node_label in skin_node_labels:
+                try:
+                    scalar = float(value.data)
+                except (TypeError, ValueError):
+                    scalar = float(value.data[0])
+                shared_temperature.append(scalar)
+                if node_label not in stiff_node_labels:
+                    inner_temperature.append(scalar)
+
+        if len(inner_temperature) == 0:
+            inner_temperature = shared_temperature
+        outfile_name = open('InnerTemperature.txt', 'w')
+        outfile_name.write('%f \n' % max(inner_temperature))
+        outfile_name.close()
+    finally:
+        odb.close()
 
 
 # 修改初始骨架位置
@@ -563,35 +668,17 @@ def reSketchOrigin(para_1, para_2, para_3, para_4, para_5, para_6, para_7):
 # ==============================================================================
 #                                  主执行逻辑
 # ==============================================================================
-name='XSJ-6'
+name = 'XSJ-6'
 
-# 1. 计算并保存重量
-try:
-   print("Calculating weight...")
-   GetWeight()
-except Exception as e:
-   print("Error calculating weight: %s" % str(e))
+print("Calculating weight...")
+GetWeight()
+submitJob(name)
 
-# 2. 提交计算 (注意：submitJob 内部现在会通过 waitForCompletion 等待计算结束)
-try:
-   submitJob(name)
-except Exception as e:
-   print("Job submission failed: %s" % str(e))
-
-# 3. 缓冲等待 (防止 ODB 文件锁死)
 print("Analysis finished. Sleeping for 10 seconds to ensure file unlock...")
 time.sleep(10)  # 这一步非常重要！不要删！
 
-# 4. 提取结果
 odb_file = name + '.odb'
-if os.path.exists(odb_file):
-   print("ODB file found. Extracting results...")
-   try:
-      maxMisesDis(name)
-   except Exception as e:
-      print("Post-processing failed: %s" % str(e))
-else:
-   print("Error: ODB file missing! Simulation might have failed.")
-
-# 5. 保存模型
-mdb.saveAs(pathName='XSJ-6_after_run.cae')
+if not os.path.exists(odb_file):
+    raise RuntimeError("ODB file is missing after the Abaqus job.")
+print("ODB file found. Extracting results...")
+maxMisesDis(name)

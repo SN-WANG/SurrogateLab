@@ -1,102 +1,135 @@
-import subprocess
+# External Abaqus interface for the SurrogateLab wing-structure case
+# Author: Shengning Wang
+
 import re
-import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 
 class AbaqusModel:
-    def __init__(self, fidelity='high'):
+    """Run one isolated Abaqus thermal-structural wing simulation."""
+
+    command_name = "abq2022"
+    input_vars = ["thick1", "thick2", "thick3"]
+    output_vars = ["weight", "displacement", "stress_skin", "stress_stiff", "inner_temperature"]
+    result_files = {
+        "weight": "weight.txt",
+        "displacement": "Displacement.txt",
+        "stress_skin": "Mises-outterFaces.txt",
+        "stress_stiff": "Mises-originStiff.txt",
+        "inner_temperature": "InnerTemperature.txt",
+    }
+
+    def __init__(self, fidelity: str = "high"):
         """
-        :param fidelity: 'high' (默认，保持模板 meshSize=30) 或 'low' (强制修改 meshSize=50)
+        Initialize the external Abaqus model.
+
+        Args:
+            fidelity (str): ``high`` uses mesh size 30 and ``low`` uses mesh size 50.
         """
-        # 保存保真度设置
+        if fidelity not in {"high", "low"}:
+            raise ValueError(f"Unknown Abaqus fidelity: {fidelity!r}.")
+
+        root = Path(__file__).resolve().parent
         self.fidelity = fidelity
+        self.template_file = root / "wing_structure_template.py"
+        self.model_file = root / "wing_structure_model.cae"
+        self.run_file = "wing_structure_runtime.py"
 
-        # ================= 配置区域 =================
-        self.template_file = 'wing_structure_template.py'
-        self.run_file = 'wing_structure_runtime.py'
-        self.abaqus_cmd = "abq2022 cae noGUI={}"
+    def run(self, input_arr) -> np.ndarray:
+        """
+        Run Abaqus for one TPS thickness design.
 
-        self.input_vars = ['thick1', 'thick2', 'thick3']
+        Args:
+            input_arr: SiC, Aerogel, and Ti65 layer thicknesses. (3,).
 
-        self.result_files = {
-            'weight': 'weight.txt',
-            'displacement': 'Displacement.txt',
-            'stress_skin': 'Mises-outterFaces.txt',
-            'stress_stiff': 'Mises-originStiff.txt'
-        }
+        Returns:
+            np.ndarray: Weight, displacement, skin stress, stiffener stress, and inner temperature. (5,).
 
-        self.output_vars = ['weight', 'displacement', 'stress_skin', 'stress_stiff']
-        # ===========================================
+        Raises:
+            ValueError: If the input does not contain exactly three values.
+            RuntimeError: If Abaqus cannot run or any scalar result is invalid.
+        """
+        x = np.asarray(input_arr, dtype=float).reshape(-1)
+        if x.size != len(self.input_vars):
+            raise ValueError(f"Expected {len(self.input_vars)} design variables, received {x.size}.")
 
-    def run(self, input_arr):
-        if isinstance(input_arr, np.ndarray):
-            x = input_arr.flatten()
-        else:
-            x = np.array(input_arr)
-
-        if len(x) != 3:
-            print(f"[Error] 输入维度错误，需要 3 个变量，实际输入: {len(x)}")
-            return np.full(4, np.nan)
-
-        # 1. 基础设计变量
         params = dict(zip(self.input_vars, x))
+        params["meshSize"] = 30.0 if self.fidelity == "high" else 50.0
 
-        # 2. 根据保真度设置处理 meshSize
-        # 如果是 low，我们将 meshSize 加入待修改的参数列表，值为 50
-        # 如果是 high，我们不把 meshSize 加入 params，正则替换时就会跳过它，保留模板原值(30)
-        if self.fidelity == 'low':
-            params['meshSize'] = 50
+        with tempfile.TemporaryDirectory(prefix="surrogatelab_abaqus_") as temp_dir:
+            work_dir = Path(temp_dir)
+            run_file = self._prepare_workspace(work_dir, params)
+            log_output = self._run_abaqus(work_dir, run_file)
+            return self._read_results(work_dir, log_output)
 
-        if not self._update_script(params):
-            return np.full(4, np.nan)
+    def _prepare_workspace(self, work_dir: Path, params: dict) -> Path:
+        if not self.template_file.is_file():
+            raise RuntimeError(f"Abaqus template not found: {self.template_file}")
+        if not self.model_file.is_file():
+            raise RuntimeError(f"Abaqus CAE model not found: {self.model_file}")
 
-        self._run_abaqus()
+        shutil.copy2(self.model_file, work_dir / self.model_file.name)
+        content = self.template_file.read_text(encoding="utf-8")
+        number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
-        return self._read_results()
+        for name, value in params.items():
+            pattern = rf"(?m)^({re.escape(name)}\s*=\s*){number}[ \t]*$"
+            content, count = re.subn(pattern, lambda match: f"{match.group(1)}{value:.4f}", content, count=1)
+            if count != 1:
+                raise RuntimeError(f"Abaqus template parameter not found: {name}")
 
-    def _update_script(self, params):
+        run_file = work_dir / self.run_file
+        run_file.write_text(content, encoding="utf-8")
+        return run_file
+
+    def _run_abaqus(self, work_dir: Path, run_file: Path) -> str:
+        command = [self.command_name, "cae", f"noGUI={run_file}"]
         try:
-            with open(self.template_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+            completed = subprocess.run(
+                command,
+                cwd=work_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Unable to start external Abaqus solver {self.command_name!r}: {exc}") from exc
 
-            for key, value in params.items():
-                # 正则替换：匹配 key = 数字，替换为 key = 新数值
-                pattern = rf'({key}\s*=\s*)[\d\.]+'
-                replacement = f'{key}={value:.4f}'
-                content = re.sub(pattern, replacement, content)
+        if completed.returncode != 0:
+            message = f"Abaqus exited with status {completed.returncode}."
+            raise RuntimeError(self._with_log_tail(message, completed.stdout))
+        return completed.stdout
 
-            with open(self.run_file, 'w', encoding='utf-8') as f:
-                f.write(content)
-            return True
-        except Exception as e:
-            print(f"[Error] 更新脚本失败: {e}")
-            return False
-
-    def _run_abaqus(self):
-        current_dir = os.path.abspath(os.getcwd())
-        script_path = os.path.join(current_dir, self.run_file)
-        cmd = self.abaqus_cmd.format(script_path)
-
-        try:
-            subprocess.run(cmd, shell=True, cwd=current_dir, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            print("  [Warning] Abaqus 运行返回错误代码 (可能是许可问题或模型不收敛)")
-
-    def _read_results(self):
+    def _read_results(self, work_dir: Path, log_output: str) -> np.ndarray:
         results = []
-        for var_name in self.output_vars:
-            file_name = self.result_files[var_name]
-            val = np.nan
+        for name in self.output_vars:
+            result_file = work_dir / self.result_files[name]
+            if not result_file.is_file():
+                raise RuntimeError(self._with_log_tail(f"Abaqus result is missing: {result_file.name}.", log_output))
 
-            if os.path.exists(file_name):
-                try:
-                    with open(file_name, 'r') as f:
-                        val = float(f.read().strip())
-                except:
-                    pass
+            try:
+                value = float(result_file.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError) as exc:
+                message = f"Abaqus result is unreadable: {result_file.name}."
+                raise RuntimeError(self._with_log_tail(message, log_output)) from exc
+            if not np.isfinite(value):
+                message = f"Abaqus result is not finite: {result_file.name}={value}."
+                raise RuntimeError(self._with_log_tail(message, log_output))
+            results.append(value)
 
-            results.append(val)
+        return np.asarray(results, dtype=float)
 
-        return np.array(results)
+    @staticmethod
+    def _with_log_tail(message: str, log_output: str, max_lines: int = 80) -> str:
+        lines = log_output.splitlines()
+        if not lines:
+            return message
+        tail = "\n".join(lines[-max_lines:])
+        return f"{message}\nAbaqus log tail:\n{tail}"

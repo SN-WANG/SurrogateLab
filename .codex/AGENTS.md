@@ -6,9 +6,11 @@
 - The repository has two main execution paths:
   - analytic benchmarks: `bench_main.py -> bench_config.py -> bench_funcs.py`
   - engineering validation: `case_main.py -> case_config.py -> AbaqusModel`
-- The current engineering workflow is centered on two outputs only:
-  - `weight`
-  - `stress_skin`
+- The current engineering workflow has five raw Abaqus responses and two validation targets:
+  - raw responses: `weight`, `displacement`, `stress_skin`, `stress_stiff`, `inner_temperature`
+  - validation targets:
+    - `weight`
+    - `stress_skin`
 
 ## Canonical Sources of Truth
 
@@ -16,7 +18,8 @@
 - `bench_funcs.py` is the canonical registry for the current analytic benchmark functions and their names.
 - `bench_config.py` is the canonical place for current default analytic validation settings.
 - `case_config.py` is the canonical place for current default engineering validation settings.
-- The current local `AbaqusModel` is only a mock, but its public call contract must remain compatible with the real remote workflow: instantiate the model and call `run(input_arr)`.
+- The engineering `AbaqusModel` calls the real external `abq2022` solver. Its public contract is to instantiate the model and call `run(input_arr)`.
+- Engineering runs must fail clearly when `abq2022` is unavailable; no local proxy fallback is permitted.
 
 ## WSNet Relationship
 
@@ -57,10 +60,9 @@
   - `num_test = 50`
   - `num_lf = 30`
   - `num_hf = 15`
-  - `num_active_initial = 3`
+  - `num_active_initial = 2`
   - `num_infill = 21`
-- The current engineering mock scales `weight` to an engineering-style range compatible with the `0.31` constraint while preserving the same public interface.
-- Only `weight` and `stress_skin` are first-class engineering validation targets right now; the other two mock outputs can remain present but are not the focus of default reporting.
+- Only `weight` and `stress_skin` are first-class engineering validation targets; the other three raw responses remain available but are not used by default reporting.
 
 ## Naming Defaults
 
@@ -94,11 +96,12 @@
 - Prefer small, explicit helper functions over large monolithic scripts.
 - Keep benchmark and engineering defaults easy to audit from the config files.
 - When changing thresholds or sample counts, preserve the benchmark-function identities and the engineering output focus unless the user explicitly asks otherwise.
-- When changing the Abaqus mock, protect the call interface first and the exact local numeric scaling second.
+- When changing the Abaqus interface, protect the five-response ordering and the external-only failure semantics.
 - Default outputs are written directly to the repository root as `bench_results.json` for analytic runs and `case_doe_cache.npy` / `case_results.json` for engineering runs.
+- The unified `main.py` quality gate runs the engineering entry first and therefore also requires `abq2022`.
 
 ## Non-Goals
 
 - Do not silently redesign shared optimization or sampling APIs in SurrogateLab if the real change belongs in WSNet.
 - Do not replace the current benchmark functions just to force higher scores.
-- Do not widen the engineering workflow back to all four Abaqus outputs unless the user explicitly asks for that.
+- Do not promote the three auxiliary Abaqus responses to validation targets unless the user explicitly asks for that.
