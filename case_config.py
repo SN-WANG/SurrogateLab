@@ -44,7 +44,7 @@ DESIGN_SPACE = {
     "num_outputs": 5,
     "bounds_lower": [4.0, 4.0, 4.0],
     "bounds_upper": [10.0, 10.0, 10.0],
-    "input_names": ["thick1", "thick2", "thick3"],
+    "input_names": ["sic_thick", "aerogel_thick", "ti65_thick"],
     "output_names": ["weight", "displacement", "stress_skin", "stress_stiff", "inner_temperature"],
 }
 

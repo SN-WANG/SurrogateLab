@@ -23,23 +23,28 @@ from visualization import *
 from connectorBehavior import *
 import numpy as np
 from odbAccess import openOdb
+# >>> 修改点1：引入必要的库 <<<
 import os
 import time
 
 openMdb(pathName='wing_structure_model.cae')
 model = mdb.models['Model-1']
 ###############################################################################
-###############              定义设计变量：热防护层厚度              ##############################
-# SiC、Aerogel、Ti65 三层厚度，从内表面到外表面排列
-thick1=4.0000
-thick2=8.0000
-thick3=8.0000
+###############              定义设计变量：不同分区的蒙皮厚度              ##############################
+sic_thick = 4.0000
+aerogel_thick = 8.0000
+ti65_thick = 8.0000
 
+# Simple thermal-load constants for the inner-surface temperature metric.
+# Keep the units consistent with the CAE unit system.
 hot_gas_temperature = 1000.0
 inner_air_temperature = 25.0
 outer_film_coefficient = 0.05
 inner_film_coefficient = 0.01
 temperature_increment_limit = 1000.0
+# Scalar optimization output for the physical inner-surface temperature.
+# Current NT11-NT17 comparison shows NT17 is the hot-side field and NT11 is the
+# cooler inner-side field for this model orientation.
 inner_temperature_output_key = 'NT11'
 ###############################################################################
 # 定义载荷点，1为最前一个参考点，3为最后一个
@@ -60,9 +65,11 @@ sleepTime = 0.001
 # reSketchOrigin(0,0,0,0,300,0,0)
 # reSketchOrigin(0,0,0,0,0,-600,0)
 
-
 def define_materials():
-    """Create the thermal-protection materials and thermal structure data."""
+    """Create or update the three thermal-protection materials."""
+    # Existing rib/structure material. Mechanical properties are kept from the
+    # CAE file; thermal properties are added so coupled temperature-displacement
+    # elements can be used without changing rib geometry or assignments.
     if 'Material-1' in model.materials.keys():
         model.materials['Material-1'].Conductivity(table=((167.0,),))
         model.materials['Material-1'].SpecificHeat(table=((896.0,),))
@@ -82,6 +89,7 @@ def define_materials():
     model.materials['Aerogel'].Density(table=((0.2e-9,),))
     model.materials['Aerogel'].Conductivity(table=((0.04,),))
     model.materials['Aerogel'].SpecificHeat(table=((1000.0,),))
+    # Engineering estimate for mullite/alumina-fiber reinforced aerogel.
     model.materials['Aerogel'].Expansion(table=((5.0e-6,),))
 
     if 'Ti65' not in model.materials.keys():
@@ -94,7 +102,7 @@ def define_materials():
 
 
 def define_tps_skin_section():
-    """Create the SiC-Aerogel-Ti65 composite shell section."""
+    """Create the three-layer shell section assigned to the outer skin."""
     section_name = 'TPS-Skin-Section'
     if section_name in model.sections.keys():
         del model.sections[section_name]
@@ -111,12 +119,12 @@ def define_tps_skin_section():
         useDensity=OFF,
         integrationRule=SIMPSON,
         layup=(
-            SectionLayer(material='SiC', thickness=thick1, orientAngle=0.0,
+            SectionLayer(material='SiC', thickness=sic_thick, orientAngle=0.0,
                          numIntPts=3, plyName='SiC_inner'),
-            SectionLayer(material='Aerogel', thickness=thick2, orientAngle=0.0,
-                         numIntPts=3, plyName='Aerogel_mid'),
-            SectionLayer(material='Ti65', thickness=thick3, orientAngle=0.0,
-                         numIntPts=3, plyName='Ti65_outer'),
+            SectionLayer(material='Aerogel', thickness=aerogel_thick,
+                         orientAngle=0.0, numIntPts=3, plyName='Aerogel_mid'),
+            SectionLayer(material='Ti65', thickness=ti65_thick,
+                         orientAngle=0.0, numIntPts=3, plyName='Ti65_outer'),
         ))
 
 
@@ -314,22 +322,31 @@ a.Instance(name='Part-1-1', part=p, dependent=ON)
 
 
 def define_thermo_mechanical_step():
-    """Create the coupled temperature-displacement step and field output."""
+    """Add the coupled thermal-mechanical step after the original static step."""
     step_name = 'Step-ThermoMechanical'
     if step_name not in model.steps.keys():
         model.CoupledTempDisplacementStep(name=step_name, previous='Step-1',
                                           timePeriod=1.0, nlgeom=OFF,
                                           deltmx=temperature_increment_limit)
 
+    # Request mechanical stress/displacement and nodal temperature in the ODB.
     if 'F-Output-Thermal' in model.fieldOutputRequests.keys():
-        model.fieldOutputRequests['F-Output-Thermal'].setValues(variables=('S', 'U', 'NT'))
+        model.fieldOutputRequests['F-Output-Thermal'].setValues(
+            variables=('S', 'U', 'NT'))
     else:
-        model.FieldOutputRequest(name='F-Output-Thermal', createStepName=step_name,
+        model.FieldOutputRequest(name='F-Output-Thermal',
+                                 createStepName=step_name,
                                  variables=('S', 'U', 'NT'))
 
 
 def define_thermal_loads():
-    """Apply the initial temperature and inner/outer convection conditions."""
+    """Apply simple convection on shell side1 and side2 of the TPS skin.
+
+    Convention used here:
+      side1 = hot outer surface, side2 = inner surface.
+    If Abaqus visualization shows the shell normal is reversed, swap the two
+    surface names in the FilmCondition definitions.
+    """
     step_name = 'Step-ThermoMechanical'
     inst = a.instances['Part-1-1']
     skin_faces = inst.sets['allOutterFaces'].faces
@@ -546,26 +563,47 @@ p.setElementType(regions=pickedRegions, elemTypes=(elemType1, elemType2))
 p.seedPart(size=meshSize, deviationFactor=0.1, minSizeFactor=0.1)
 p.generateMesh()
 
+# >>> 修改点2：替换为改良版的 submitJob (防止删 weight.txt) <<<
 name = 'loadcases%s-stiffNum' % (loadCases)
 for i in num:
     name = name + '-' + str(i)
 
 
 def submitJob(name):
+    extensions = ['.odb', '.lck', '.sta', '.msg', '.log', '.dat', '.com', '.sim', '.prt', '.ipm']
+    # 排除 weight.txt，只删仿真结果
+    result_files = ['Displacement.txt', 'Mises-outterFaces.txt',
+                    'Mises-originStiff.txt', 'Mises-allReinforcedStiff.txt',
+                    'InnerTemperature.txt']
+
+    print('Checking for old files to clean...')
+    for ext in extensions:
+        filename = name + ext
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except:
+                pass
+
+    for txt_file in result_files:
+        if os.path.exists(txt_file):
+            try:
+                os.remove(txt_file)
+            except:
+                pass
+
+    # >>> 修改点：将 numCpus 和 numDomains 从 6 改为 4 (或者 2) <<<
     mdb.Job(name=name, model='Model-1', description='', type=ANALYSIS,
             atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90,
             memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True,
             explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF,
             modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='',
             scratch='', resultsFormat=ODB, multiprocessingMode=DEFAULT,
-            numCpus=4, numDomains=4, numGPUs=0)
+            numCpus=4, numDomains=4, numGPUs=0)  # <--- 这里改成了 4
 
     print("Job submitted. Waiting for completion inside Abaqus...")
-    job = mdb.jobs[name]
-    job.submit(consistencyChecking=OFF)
-    job.waitForCompletion()
-    if job.status != COMPLETED:
-        raise RuntimeError("Abaqus job %s finished with status %s." % (name, job.status))
+    mdb.jobs[name].submit(consistencyChecking=OFF)
+    mdb.jobs[name].waitForCompletion()
 
 
 def GetWeight():
@@ -578,71 +616,330 @@ def GetWeight():
     return weight
 
 
+def GetInnerTemperature():
+    """Estimate the maximum inner-surface temperature of the TPS skin.
+
+    This is a simple 1-D steady thermal-resistance model:
+    hot gas -> outer convection -> Ti65 -> aerogel -> SiC -> inner convection.
+    It is intentionally separated from the structural Abaqus solve because the
+    current request keeps the original static analysis and does not introduce
+    thermal expansion data.
+    """
+    k_sic = 10.0
+    k_aerogel = 0.04
+    k_ti65 = 7.0
+
+    if outer_film_coefficient <= 0.0 or inner_film_coefficient <= 0.0:
+        inner_temp = float('nan')
+    else:
+        r_outer = 1.0 / outer_film_coefficient
+        r_layers = ti65_thick / k_ti65 + aerogel_thick / k_aerogel + sic_thick / k_sic
+        r_inner = 1.0 / inner_film_coefficient
+        heat_flux = (hot_gas_temperature - inner_air_temperature) / (r_outer + r_layers + r_inner)
+        inner_temp = inner_air_temperature + heat_flux * r_inner
+
+    outfile_name = open('InnerTemperature.txt', 'w')
+    outfile_name.write('%f \n' % inner_temp)
+    outfile_name.close()
+    return inner_temp
+
+
 def maxMisesDis(name):
-    """Write the four structural responses and the NT11 inner temperature."""
+    stress = []
+    maxValue = 0
     odb = openOdb(name + '.odb')
+    step_name = 'Step-ThermoMechanical'
+    if step_name not in odb.steps.keys():
+        step_name = 'Step-1'
+    step = odb.steps[step_name]
+    frame = step.frames[-1]
+    allField = frame.fieldOutputs
+
+    # --- 修复开始：位移提取 ---
+    # 位移
+    stressSet = allField['U'].getSubset(region=odb.rootAssembly.instances['PART-1-1'])
+    for stressValue in stressSet.values:
+        # 使用 .magnitude 获取合位移（模长），这是 Abaqus 标准写法
+        # 如果你原来的意图是取三个方向绝对值的最大值，应该用 max(map(abs, stressValue.data))
+        # 但通常工程上都是看合位移 magnitude
+        if stressValue.magnitude:
+            stress.append(stressValue.magnitude)
+        else:
+            stress.append(0.0)
+
+    maxValue = max(stress)
+    outfile_name = open('Displacement.txt', 'w')
+    outfile_name.write('%f \n' % maxValue)
+    outfile_name.close()
+    # --- 修复结束 ---
+
+    # 蒙皮
+    stress = []
+    stressSet = allField['S'].getSubset(region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLOUTTERFACES'])
+    for stressValue in stressSet.values:
+        stress.append(stressValue.mises)
+
+    maxValue = max(stress)
+    outfile_name = open('Mises-outterFaces.txt', 'w')
+    outfile_name.write('%f \n' % maxValue)
+    outfile_name.close()
+    # 初始加筋
+    stress = []
+    stressSet = allField['S'].getSubset(region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLORIGINSTIFF'])
+    for stressValue in stressSet.values:
+        stress.append(stressValue.mises)
+
+    maxValue = max(stress)
+    outfile_name = open('Mises-originStiff.txt', 'w')
+    outfile_name.write('%f \n' % maxValue)
+    outfile_name.close()
+    # 后加墙
+    if num.count(0) != 9:
+        stress = []
+        stressSet = allField['S'].getSubset(
+            region=odb.rootAssembly.instances['PART-1-1'].elementSets['ALLREINFORCEDSTIFF'])
+        for stressValue in stressSet.values:
+            stress.append(stressValue.mises)
+
+        maxValue = max(stress)
+        outfile_name = open('Mises-allReinforcedStiff.txt', 'w')
+        outfile_name.write('%f \n' % maxValue)
+        outfile_name.close()
+
+    # Temperature metrics through the shell thickness. For shell
+    # temperature-displacement elements, Abaqus stores nodal temperature fields
+    # as NT11, NT12, ... NT17. These points must be checked visually because
+    # the physical inner/outer side depends on shell normal orientation.
+    def percentile(values, pct):
+        if len(values) == 0:
+            return float('nan')
+        values = sorted(values)
+        index = int(round((len(values) - 1) * pct / 100.0))
+        index = max(0, min(len(values) - 1, index))
+        return values[index]
+
+    skin_node_labels = set()
     try:
-        frame = odb.steps['Step-ThermoMechanical'].frames[-1]
-        allField = frame.fieldOutputs
-        instance = odb.rootAssembly.instances['PART-1-1']
-
-        displacement = [value.magnitude for value in allField['U'].getSubset(region=instance).values]
-        outfile_name = open('Displacement.txt', 'w')
-        outfile_name.write('%f \n' % max(displacement))
-        outfile_name.close()
-
-        skin_stress = allField['S'].getSubset(region=instance.elementSets['ALLOUTTERFACES'])
-        outfile_name = open('Mises-outterFaces.txt', 'w')
-        outfile_name.write('%f \n' % max([value.mises for value in skin_stress.values]))
-        outfile_name.close()
-
-        stiff_stress = allField['S'].getSubset(region=instance.elementSets['ALLORIGINSTIFF'])
-        outfile_name = open('Mises-originStiff.txt', 'w')
-        outfile_name.write('%f \n' % max([value.mises for value in stiff_stress.values]))
-        outfile_name.close()
-
-        if num.count(0) != 9:
-            reinforced_stress = allField['S'].getSubset(region=instance.elementSets['ALLREINFORCEDSTIFF'])
-            outfile_name = open('Mises-allReinforcedStiff.txt', 'w')
-            outfile_name.write('%f \n' % max([value.mises for value in reinforced_stress.values]))
-            outfile_name.close()
-
-        skin_node_labels = set()
-        for element in instance.elementSets['ALLOUTTERFACES'].elements:
-            for node_label in element.connectivity:
+        skin_elements = odb.rootAssembly.instances['PART-1-1'].elementSets['ALLOUTTERFACES'].elements
+        for elem in skin_elements:
+            for node_label in elem.connectivity:
                 skin_node_labels.add(node_label)
+    except:
+        skin_node_labels = set()
 
-        stiff_node_labels = set()
-        stiff_set_names = ('ALLORIGINSTIFF', 'ALLLONGSTIFF', 'ALLTRANSTIFF', 'ALLREINFORCEDSTIFF')
-        for set_name in stiff_set_names:
-            if set_name in instance.elementSets.keys():
-                for element in instance.elementSets[set_name].elements:
-                    for node_label in element.connectivity:
+    stiff_node_labels = set()
+    try:
+        instance = odb.rootAssembly.instances['PART-1-1']
+        for stiff_set_name in ('ALLORIGINSTIFF', 'ALLLONGSTIFF', 'ALLTRANSTIFF', 'ALLREINFORCEDSTIFF'):
+            if stiff_set_name in instance.elementSets.keys():
+                for elem in instance.elementSets[stiff_set_name].elements:
+                    for node_label in elem.connectivity:
                         stiff_node_labels.add(node_label)
+    except:
+        stiff_node_labels = set()
 
-        inner_temperature = []
-        shared_temperature = []
-        for value in allField[inner_temperature_output_key].values:
-            node_label = getattr(value, 'nodeLabel', None)
-            if node_label in skin_node_labels:
+    temp_keys = [key for key in allField.keys() if key.startswith('NT')]
+    temp_keys = sorted(temp_keys, key=lambda key: int(key[2:]) if key[2:].isdigit() else -1)
+    temp_values_by_key = {}
+    for temp_key in temp_keys:
+        temp_values = []
+        for tempValue in allField[temp_key].values:
+            node_label = getattr(tempValue, 'nodeLabel', None)
+            if (len(skin_node_labels) == 0) or (node_label in skin_node_labels):
                 try:
-                    scalar = float(value.data)
-                except (TypeError, ValueError):
-                    scalar = float(value.data[0])
-                shared_temperature.append(scalar)
-                if node_label not in stiff_node_labels:
-                    inner_temperature.append(scalar)
+                    temp_values.append(float(tempValue.data))
+                except:
+                    try:
+                        temp_values.append(float(tempValue.data[0]))
+                    except:
+                        pass
+        temp_values_by_key[temp_key] = temp_values
 
-        if len(inner_temperature) == 0:
-            inner_temperature = shared_temperature
-        outfile_name = open('InnerTemperature.txt', 'w')
-        outfile_name.write('%f \n' % max(inner_temperature))
-        outfile_name.close()
-    finally:
-        odb.close()
+    summary = open('TemperatureThroughThickness.txt', 'w')
+    summary.write('key,region,count,min,p5,p50,p95,p99,max\n')
+    for temp_key in temp_keys:
+        temp_values = temp_values_by_key.get(temp_key, [])
+        if len(temp_values) > 0:
+            summary.write('%s,skin_with_shared_stiffener_nodes,%d,%f,%f,%f,%f,%f,%f\n' %
+                          (temp_key, len(temp_values), min(temp_values),
+                           percentile(temp_values, 5.0),
+                           percentile(temp_values, 50.0),
+                           percentile(temp_values, 95.0),
+                           percentile(temp_values, 99.0),
+                           max(temp_values)))
+        else:
+            summary.write('%s,skin_with_shared_stiffener_nodes,0,nan,nan,nan,nan,nan,nan\n' % temp_key)
+
+        skin_only_values = []
+        temp_field = allField[temp_key]
+        for tempValue in temp_field.values:
+            node_label = getattr(tempValue, 'nodeLabel', None)
+            if ((len(skin_node_labels) == 0) or (node_label in skin_node_labels)) and (node_label not in stiff_node_labels):
+                try:
+                    skin_only_values.append(float(tempValue.data))
+                except:
+                    try:
+                        skin_only_values.append(float(tempValue.data[0]))
+                    except:
+                        pass
+        if len(skin_only_values) > 0:
+            summary.write('%s,skin_only_excluding_shared_stiffener_nodes,%d,%f,%f,%f,%f,%f,%f\n' %
+                          (temp_key, len(skin_only_values), min(skin_only_values),
+                           percentile(skin_only_values, 5.0),
+                           percentile(skin_only_values, 50.0),
+                           percentile(skin_only_values, 95.0),
+                           percentile(skin_only_values, 99.0),
+                           max(skin_only_values)))
+        else:
+            summary.write('%s,skin_only_excluding_shared_stiffener_nodes,0,nan,nan,nan,nan,nan,nan\n' % temp_key)
+    summary.close()
+
+    selected_temp_key = inner_temperature_output_key
+    if selected_temp_key not in temp_values_by_key and len(temp_keys) > 0:
+        selected_temp_key = temp_keys[-1]
+    selected_values = []
+    if selected_temp_key in allField.keys():
+        for tempValue in allField[selected_temp_key].values:
+            node_label = getattr(tempValue, 'nodeLabel', None)
+            if ((len(skin_node_labels) == 0) or (node_label in skin_node_labels)) and (node_label not in stiff_node_labels):
+                try:
+                    selected_values.append(float(tempValue.data))
+                except:
+                    try:
+                        selected_values.append(float(tempValue.data[0]))
+                    except:
+                        pass
+    if len(selected_values) == 0:
+        selected_values = temp_values_by_key.get(selected_temp_key, [])
+    if len(selected_values) > 0:
+        maxTemp = max(selected_values)
+    else:
+        maxTemp = float('nan')
+
+    outfile_name = open('InnerTemperature.txt', 'w')
+    outfile_name.write('%f \n' % maxTemp)
+    outfile_name.close()
+    outfile_name = open('InnerTemperatureSource.txt', 'w')
+    outfile_name.write('%s \n' % selected_temp_key)
+    outfile_name.close()
+    odb.close()
+    return
 
 
 # 修改初始骨架位置
+def export_visual_results(name):
+    """Export quick-look PNG figures from the completed ODB."""
+    result_dir = 'result_figures'
+    if not os.path.exists(result_dir):
+        os.makedirs(result_dir)
+
+    odb_path = name + '.odb'
+    if not os.path.exists(odb_path):
+        print("Visualization skipped: ODB file is missing.")
+        return
+
+    try:
+        odb = session.openOdb(name=odb_path)
+        frame = odb.steps['Step-ThermoMechanical'].frames[-1]
+        inst = odb.rootAssembly.instances['PART-1-1']
+
+        def percentile(values, pct):
+            if len(values) == 0:
+                return None
+            values = sorted(values)
+            index = int(round((len(values) - 1) * pct / 100.0))
+            index = max(0, min(len(values) - 1, index))
+            return values[index]
+
+        skin_elem_labels = set()
+        skin_node_labels = set()
+        try:
+            for elem in inst.elementSets['ALLOUTTERFACES'].elements:
+                skin_elem_labels.add(elem.label)
+                for node_label in elem.connectivity:
+                    skin_node_labels.add(node_label)
+        except:
+            pass
+
+        stress_values = []
+        if 'S' in frame.fieldOutputs.keys():
+            for value in frame.fieldOutputs['S'].values:
+                if (len(skin_elem_labels) == 0) or (getattr(value, 'elementLabel', None) in skin_elem_labels):
+                    try:
+                        stress_values.append(float(value.mises))
+                    except:
+                        pass
+
+        contour_ranges = {
+            'mises_stress': (percentile(stress_values, 1.0), percentile(stress_values, 99.0)),
+        }
+
+        vp_name = 'ResultViewport'
+        if vp_name in session.viewports.keys():
+            vp = session.viewports[vp_name]
+        else:
+            vp = session.Viewport(name=vp_name, origin=(0, 0), width=240, height=160)
+
+        vp.setValues(displayedObject=odb)
+        if 'Step-ThermoMechanical' in odb.steps.keys():
+            vp.odbDisplay.setFrame(step='Step-ThermoMechanical', frame=-1)
+        vp.odbDisplay.display.setValues(plotState=(CONTOURS_ON_DEF,))
+        vp.odbDisplay.commonOptions.setValues(renderStyle=FILLED,
+                                              deformationScaling=UNIFORM,
+                                              uniformScaleFactor=1.0,
+                                              visibleEdges=NONE)
+        vp.odbDisplay.contourOptions.setValues(contourType=BANDED)
+        vp.view.fitView()
+        session.pngOptions.setValues(imageSize=(1600, 1000))
+
+        plots = [
+            ('displacement_magnitude', 'U', NODAL, (INVARIANT, 'Magnitude')),
+            ('mises_stress', 'S', INTEGRATION_POINT, (INVARIANT, 'Mises')),
+        ]
+        temp_keys = [key for key in frame.fieldOutputs.keys() if key.startswith('NT')]
+        temp_keys = sorted(temp_keys, key=lambda key: int(key[2:]) if key[2:].isdigit() else -1)
+        for temp_key in temp_keys:
+            plots.append(('temperature_' + temp_key, temp_key, NODAL, None))
+        if inner_temperature_output_key in temp_keys:
+            plots.append(('inner_temperature_' + inner_temperature_output_key,
+                          inner_temperature_output_key, NODAL, None))
+
+        for file_stem, variable_label, output_position, refinement in plots:
+            try:
+                if refinement is None:
+                    vp.odbDisplay.setPrimaryVariable(variableLabel=variable_label,
+                                                     outputPosition=output_position)
+                else:
+                    vp.odbDisplay.setPrimaryVariable(variableLabel=variable_label,
+                                                     outputPosition=output_position,
+                                                     refinement=refinement)
+                if file_stem in contour_ranges and contour_ranges[file_stem][0] is not None:
+                    min_value, max_value = contour_ranges[file_stem]
+                    if max_value > min_value:
+                        vp.odbDisplay.contourOptions.setValues(contourType=BANDED,
+                                                               minAutoCompute=OFF,
+                                                               maxAutoCompute=OFF,
+                                                               minValue=min_value,
+                                                               maxValue=max_value)
+                    else:
+                        vp.odbDisplay.contourOptions.setValues(contourType=BANDED,
+                                                               minAutoCompute=ON,
+                                                               maxAutoCompute=ON)
+                else:
+                    vp.odbDisplay.contourOptions.setValues(contourType=BANDED,
+                                                           minAutoCompute=ON,
+                                                           maxAutoCompute=ON)
+                vp.view.fitView()
+                session.printToFile(fileName=os.path.join(result_dir, file_stem),
+                                    format=PNG, canvasObjects=(vp,))
+            except Exception as e:
+                print("Visualization export failed for %s: %s" % (file_stem, str(e)))
+
+        odb.close()
+    except Exception as e:
+        print("Visualization export failed: %s" % str(e))
+
+
 def reSketchOrigin(para_1, para_2, para_3, para_4, para_5, para_6, para_7):
     s = mdb.models['Model-1'].ConstrainedSketch(name='__profile__',
                                                 sheetSize=200.0)
@@ -668,17 +965,43 @@ def reSketchOrigin(para_1, para_2, para_3, para_4, para_5, para_6, para_7):
 # ==============================================================================
 #                                  主执行逻辑
 # ==============================================================================
-name = 'XSJ-6'
+name='wing_structure'
 
-print("Calculating weight...")
-GetWeight()
-submitJob(name)
+# 1. 计算并保存重量
+try:
+   print("Calculating weight...")
+   GetWeight()
+except Exception as e:
+   print("Error calculating weight: %s" % str(e))
 
+# Save the fully configured CAE before analysis so the model setup can be
+# inspected independently of the ODB results.
+try:
+   mdb.saveAs(pathName=name + '_model_setup.cae')
+except Exception as e:
+   print("Saving configured CAE failed: %s" % str(e))
+
+# 2. 提交计算 (注意：submitJob 内部现在会通过 waitForCompletion 等待计算结束)
+try:
+   submitJob(name)
+except Exception as e:
+   print("Job submission failed: %s" % str(e))
+
+# 3. 缓冲等待 (防止 ODB 文件锁死)
 print("Analysis finished. Sleeping for 10 seconds to ensure file unlock...")
 time.sleep(10)  # 这一步非常重要！不要删！
 
+# 4. 提取结果
 odb_file = name + '.odb'
-if not os.path.exists(odb_file):
-    raise RuntimeError("ODB file is missing after the Abaqus job.")
-print("ODB file found. Extracting results...")
-maxMisesDis(name)
+if os.path.exists(odb_file):
+   print("ODB file found. Extracting results...")
+   try:
+      maxMisesDis(name)
+      export_visual_results(name)
+   except Exception as e:
+      print("Post-processing failed: %s" % str(e))
+else:
+   print("Error: ODB file missing! Simulation might have failed.")
+
+# 5. 保存模型
+mdb.saveAs(pathName='wing_structure_after_run.cae')

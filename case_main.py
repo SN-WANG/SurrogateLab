@@ -44,7 +44,7 @@ def require_external_solver() -> Dict[str, str]:
     Raises:
         RuntimeError: If the Abaqus command is unavailable.
     """
-    command_name = AbaqusModel.command_name
+    command_name = "abq2022"
     if shutil.which(command_name) is None:
         raise RuntimeError(
             f"External Abaqus solver '{command_name}' was not found on PATH. "
