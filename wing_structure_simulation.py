@@ -88,10 +88,12 @@ class AbaqusModel:
         return run_file
 
     def _run_abaqus(self, work_dir: Path, run_file: Path) -> str:
-        command = [self.command_name, "cae", f"noGUI={run_file}"]
+        script_path = run_file.resolve()
+        command = f'{self.command_name} cae noGUI="{script_path}"'
         try:
             completed = subprocess.run(
                 command,
+                shell=True,
                 cwd=work_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
