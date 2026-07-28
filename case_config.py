@@ -101,7 +101,7 @@ def get_args() -> argparse.Namespace:
     # ============================================================
 
     general = parser.add_argument_group("General")
-    general.add_argument("--seed", type=int, default=7, help="Random seed.")
+    general.add_argument("--seed", type=int, default=31, help="Random seed.")
     general.add_argument("--seed_mode", type=str, default="single_seed", help="Run mode written into payload metadata.")
     general.add_argument(
         "--demos",
@@ -183,7 +183,7 @@ def get_args() -> argparse.Namespace:
 
     prs = parser.add_argument_group("PRS")
     prs.add_argument("--prs_degree", type=int, default=5, help="Polynomial degree for PRS.")
-    prs.add_argument("--prs_alpha", type=float, default=0.0, help="Ridge regularization for PRS.")
+    prs.add_argument("--prs_alpha", type=float, default=1.0e-3, help="Ridge regularization for PRS.")
 
     # ============================================================
     # SVR
