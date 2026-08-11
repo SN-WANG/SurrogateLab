@@ -86,7 +86,7 @@ class AnsysModel:
             "# encoding: utf-8",
             "# 2024 R1",
             'SetScriptVersion(Version="24.1.144")',
-            f"OpenProject(FilePath={project_path})",
+            f"Open(FilePath={project_path})",
             "import json",
             "items = []",
             "for p in Parameters.GetAllParameters():",
@@ -131,7 +131,7 @@ class AnsysModel:
             "# encoding: utf-8",
             "# 2024 R1",
             'SetScriptVersion(Version="24.1.144")',
-            f"OpenProject(FilePath={project_path})",
+            f"Open(FilePath={project_path})",
             'p1 = Parameters.GetParameter(Name="P1")',
             'p2 = Parameters.GetParameter(Name="P2")',
             'p3 = Parameters.GetParameter(Name="P3")',
@@ -146,10 +146,10 @@ class AnsysModel:
             '    dp0.SetParameterExpression(Parameter=p9, Expression="{0} [mm]".format(row[3]))',
             "    UpdateAllDesignPoints(DesignPoints=[dp0])",
             '    out.write("{0},{1},{2},{3}\\n".format(',
-            '        float(Parameters.GetParameter(Name="P8").Value),',
-            '        float(Parameters.GetParameter(Name="P5").Value),',
-            '        float(Parameters.GetParameter(Name="P6").Value),',
-            '        float(Parameters.GetParameter(Name="P7").Value)))',
+            '        float(Parameters.GetParameter(Name="P8").Value.Value),',
+            '        float(Parameters.GetParameter(Name="P5").Value.Value),',
+            '        float(Parameters.GetParameter(Name="P6").Value.Value),',
+            '        float(Parameters.GetParameter(Name="P7").Value.Value)))',
             "out.close()",
             "Save(Overwrite=True)",
         ]
@@ -167,9 +167,15 @@ class AnsysModel:
         """
         command = find_runwb2()
         log_path = self.work_dir / "runwb2.log"
+        journal_args = ["-B", "-R", str(journal_path)]
+        command_path = Path(command)
+        if os.name == "nt" and command_path.suffix.lower() in (".bat", ".cmd"):
+            invocation = [os.environ.get("ComSpec", "cmd.exe"), "/c", command] + journal_args
+        else:
+            invocation = [command] + journal_args
         with open(log_path, "w", encoding="utf-8", errors="replace") as log:
             completed = subprocess.run(
-                [command, "-B", str(journal_path)],
+                invocation,
                 cwd=self.work_dir,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -200,9 +206,27 @@ class AnsysModel:
         return data
 
 
+def _prefer_runwb2_bat(path: Path) -> Path:
+    """
+    Prefer the runwb2.bat wrapper that sets the ANSYS runtime environment.
+
+    Args:
+        path (Path): Located runwb2 executable or script.
+
+    Returns:
+        Path: The runwb2.bat wrapper when it exists on Windows, otherwise the input path.
+    """
+    if os.name != "nt" or path.name.lower().endswith((".bat", ".cmd")):
+        return path
+    bat_path = path.with_name("runwb2.bat")
+    if bat_path.is_file():
+        return bat_path
+    return path
+
+
 def find_runwb2() -> str:
     """
-    Locate the ANSYS Workbench batch executable.
+    Locate the ANSYS Workbench batch launcher.
 
     Returns:
         str: Absolute path or command name of runwb2.
@@ -212,11 +236,11 @@ def find_runwb2() -> str:
     """
     command = shutil.which("runwb2")
     if command is not None:
-        return command
+        return str(_prefer_runwb2_bat(Path(command)))
 
     env_command = os.environ.get("ANSYS_RUNWB2")
     if env_command and Path(env_command).is_file():
-        return env_command
+        return str(_prefer_runwb2_bat(Path(env_command)))
 
     is_windows = os.name == "nt"
     bin_dir = "Win64" if is_windows else "Linux64"
@@ -225,7 +249,7 @@ def find_runwb2() -> str:
         if env_name.startswith("AWP_ROOT") and env_value:
             candidate = Path(env_value) / "Framework" / "bin" / bin_dir / exe_name
             if candidate.is_file():
-                return str(candidate)
+                return str(_prefer_runwb2_bat(candidate))
 
     program_files = [
         Path(os.environ.get("ProgramFiles", "C:/Program Files")),
@@ -238,7 +262,7 @@ def find_runwb2() -> str:
         for version_dir in sorted(ansys_dir.glob("v*")):
             candidate = version_dir / "Framework" / "bin" / bin_dir / exe_name
             if candidate.is_file():
-                return str(candidate)
+                return str(_prefer_runwb2_bat(candidate))
 
     raise RuntimeError(
         "External ANSYS solver 'runwb2' was not found. Install ANSYS Workbench, add it to PATH, "
