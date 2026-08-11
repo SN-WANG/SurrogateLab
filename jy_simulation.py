@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -164,10 +165,15 @@ class AnsysModel:
         Raises:
             RuntimeError: If the Workbench batch process fails.
         """
-        command = f'runwb2 -B "{journal_path}"'
+        command = find_runwb2()
         log_path = self.work_dir / "runwb2.log"
         with open(log_path, "w", encoding="utf-8", errors="replace") as log:
-            completed = subprocess.run(command, shell=True, cwd=self.work_dir, stdout=log, stderr=subprocess.STDOUT)
+            completed = subprocess.run(
+                [command, "-B", str(journal_path)],
+                cwd=self.work_dir,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         if completed.returncode != 0:
             raise RuntimeError(f"runwb2 returned {completed.returncode}; see {log_path}")
 
@@ -194,6 +200,52 @@ class AnsysModel:
         return data
 
 
+def find_runwb2() -> str:
+    """
+    Locate the ANSYS Workbench batch executable.
+
+    Returns:
+        str: Absolute path or command name of runwb2.
+
+    Raises:
+        RuntimeError: If ANSYS Workbench cannot be found.
+    """
+    command = shutil.which("runwb2")
+    if command is not None:
+        return command
+
+    env_command = os.environ.get("ANSYS_RUNWB2")
+    if env_command and Path(env_command).is_file():
+        return env_command
+
+    is_windows = os.name == "nt"
+    bin_dir = "Win64" if is_windows else "Linux64"
+    exe_name = "runwb2.exe" if is_windows else "runwb2"
+    for env_name, env_value in os.environ.items():
+        if env_name.startswith("AWP_ROOT") and env_value:
+            candidate = Path(env_value) / "Framework" / "bin" / bin_dir / exe_name
+            if candidate.is_file():
+                return str(candidate)
+
+    program_files = [
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")),
+    ]
+    for base in program_files:
+        ansys_dir = base / "ANSYS Inc"
+        if not ansys_dir.is_dir():
+            continue
+        for version_dir in sorted(ansys_dir.glob("v*")):
+            candidate = version_dir / "Framework" / "bin" / bin_dir / exe_name
+            if candidate.is_file():
+                return str(candidate)
+
+    raise RuntimeError(
+        "External ANSYS solver 'runwb2' was not found. Install ANSYS Workbench, add it to PATH, "
+        "or set ANSYS_RUNWB2 to the runwb2 executable."
+    )
+
+
 def require_external_solver() -> Dict[str, str]:
     """
     Require the configured external ANSYS Workbench command.
@@ -204,12 +256,7 @@ def require_external_solver() -> Dict[str, str]:
     Raises:
         RuntimeError: If the Workbench command is unavailable.
     """
-    command_name = "runwb2"
-    if shutil.which(command_name) is None:
-        raise RuntimeError(
-            f"External ANSYS solver '{command_name}' was not found on PATH. "
-            "Install or expose ANSYS Workbench before running the engineering workflow."
-        )
+    command_name = find_runwb2()
     return {"solver": "ansys", "command_name": command_name}
 
 

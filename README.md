@@ -114,8 +114,9 @@ This writes `bench_results.json` to the repository root.
 python case_main.py
 ```
 
-The engineering workflow requires a callable external `runwb2` executable. It fails immediately when ANSYS Workbench is
-not available; there is no local proxy fallback.
+The engineering workflow requires the ANSYS Workbench `runwb2` executable, found on `PATH`, through the
+`ANSYS_RUNWB2` environment variable, or under a standard `ANSYS Inc` installation. It fails immediately when ANSYS
+Workbench is not available; there is no local proxy fallback.
 
 This writes `case_doe_cache.npy` and `case_results.json` to the repository root.
 
