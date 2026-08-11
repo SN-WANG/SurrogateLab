@@ -5,12 +5,9 @@
 - SurrogateLab is the benchmark and engineering-validation repository in the WSNet family.
 - The repository has two main execution paths:
   - analytic benchmarks: `bench_main.py -> bench_config.py -> bench_funcs.py`
-  - engineering validation: `case_main.py -> case_config.py -> AbaqusModel`
-- The current engineering workflow has five raw Abaqus responses and two validation targets:
-  - raw responses: `weight`, `displacement`, `stress_skin`, `stress_stiff`, `inner_temperature`
-  - validation targets:
-    - `weight`
-    - `stress_skin`
+  - engineering validation: `case_main.py -> case_config.py -> AnsysModel`
+- The current engineering workflow has four ANSYS responses and four validation targets:
+  - raw responses and validation targets: `mass`, `total_deformation`, `temperature`, `equivalent_stress`
 
 ## Canonical Sources of Truth
 
@@ -18,8 +15,9 @@
 - `bench_funcs.py` is the canonical registry for the current analytic benchmark functions and their names.
 - `bench_config.py` is the canonical place for current default analytic validation settings.
 - `case_config.py` is the canonical place for current default engineering validation settings.
-- The engineering `AbaqusModel` calls the real external `abq2022` solver. Its public contract is to instantiate the model and call `run(input_arr)`.
-- Engineering runs must fail clearly when `abq2022` is unavailable; no local proxy fallback is permitted.
+- The engineering `AnsysModel` calls the real external `runwb2` solver. Its public contract is to instantiate the model and call `run(input_arr)` with the 4-vector `[ti65, aerogel, sic, mesh_size]`.
+- Engineering runs must fail clearly when `runwb2` is unavailable; no local proxy fallback is permitted.
+- Multi-fidelity is controlled by the mesh size: high fidelity uses `50 [mm]`, low fidelity uses `100 [mm]`; surrogate models keep the three thickness inputs.
 
 ## WSNet Relationship
 
@@ -50,8 +48,8 @@
 - Engineering multi-fidelity defaults use a `90%` minimum accuracy threshold.
 - Engineering active-learning defaults use a `20%` relative accuracy-gain target.
 - Engineering optimization defaults use:
-  - objective: `stress_skin`
-  - constraint: `weight <= 0.31`
+  - single-objective mode: minimize `mass` with constraints `equivalent_stress <= 500 [MPa]` and `temperature <= 150 [C]`
+  - multi-objective mode: minimize `[mass, temperature]` with constraint `equivalent_stress <= 500 [MPa]`
 
 ## Current Engineering Defaults
 
@@ -62,7 +60,7 @@
   - `num_hf = 15`
   - `num_active_initial = 2`
   - `num_infill = 21`
-- Only `weight` and `stress_skin` are first-class engineering validation targets; the other three raw responses remain available but are not used by default reporting.
+- All four ANSYS responses are first-class engineering validation targets.
 
 ## Naming Defaults
 
@@ -96,12 +94,12 @@
 - Prefer small, explicit helper functions over large monolithic scripts.
 - Keep benchmark and engineering defaults easy to audit from the config files.
 - When changing thresholds or sample counts, preserve the benchmark-function identities and the engineering output focus unless the user explicitly asks otherwise.
-- When changing the Abaqus interface, protect the five-response ordering and the external-only failure semantics.
+- When changing the ANSYS interface, protect the four-response ordering, the journal batch workflow, and the external-only failure semantics.
 - Default outputs are written directly to the repository root as `bench_results.json` for analytic runs and `case_doe_cache.npy` / `case_results.json` for engineering runs.
-- The unified `main.py` quality gate runs the engineering entry first and therefore also requires `abq2022`.
+- The unified `main.py` quality gate runs the engineering entry first and therefore also requires `runwb2`.
 
 ## Non-Goals
 
 - Do not silently redesign shared optimization or sampling APIs in SurrogateLab if the real change belongs in WSNet.
 - Do not replace the current benchmark functions just to force higher scores.
-- Do not promote the three auxiliary Abaqus responses to validation targets unless the user explicitly asks for that.
+- Do not add proxy or cached simulation data for the engineering workflow.

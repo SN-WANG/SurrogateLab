@@ -4,8 +4,9 @@
 import json
 import os
 import random
-import shutil
+import tempfile
 from functools import partial
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -27,30 +28,7 @@ from sampling.diso_infill import DISOInfill
 from sampling.doe import lhs_design
 from utils.hue_logger import hue, logger
 from utils.seeder import seed_everything
-from wing_structure_simulation import AbaqusModel
-
-
-# ============================================================
-# External Solver
-# ============================================================
-
-def require_external_solver() -> Dict[str, str]:
-    """
-    Require the configured external Abaqus command.
-
-    Returns:
-        Dict[str, str]: External solver metadata.
-
-    Raises:
-        RuntimeError: If the Abaqus command is unavailable.
-    """
-    command_name = "abq2022"
-    if shutil.which(command_name) is None:
-        raise RuntimeError(
-            f"External Abaqus solver '{command_name}' was not found on PATH. "
-            "Install or expose Abaqus 2022 before running the engineering workflow."
-        )
-    return {"solver": "abaqus", "command_name": command_name}
+from jy_simulation import AnsysModel, MESH_SIZE_HIGH, MESH_SIZE_LOW, require_external_solver, run_ansys_batch
 
 
 def log_case_runtime(runtime: Dict[str, str]) -> None:
@@ -103,21 +81,6 @@ def sample_lhs(bounds: np.ndarray, num_samples: int, seed: int | None = None) ->
         finally:
             np.random.set_state(state)
     return scale_to_bounds(x_norm, bounds)
-
-
-def run_abaqus_batch(x: np.ndarray, fidelity: str = "high") -> np.ndarray:
-    """
-    Evaluate the Abaqus model on a batch of design points.
-
-    Args:
-        x (np.ndarray): Design matrix. (N, D).
-        fidelity (str): Simulation fidelity.
-
-    Returns:
-        np.ndarray: Response matrix. (N, 5).
-    """
-    model = AbaqusModel(fidelity=fidelity)
-    return np.vstack([model.run(x[i]) for i in range(x.shape[0])])
 
 
 def reset_random_state(seed: int) -> None:
@@ -365,13 +328,13 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
         data = {
             "meta": meta,
             "x_train": x_train,
-            "y_train": run_abaqus_batch(x_train, fidelity="high"),
+            "y_train": run_ansys_batch(x_train, MESH_SIZE_HIGH),
             "x_test": x_test,
-            "y_test": run_abaqus_batch(x_test, fidelity="high"),
+            "y_test": run_ansys_batch(x_test, MESH_SIZE_HIGH),
             "x_lf": x_lf,
-            "y_lf": run_abaqus_batch(x_lf, fidelity="low"),
+            "y_lf": run_ansys_batch(x_lf, MESH_SIZE_LOW),
             "x_hf": x_hf,
-            "y_hf": run_abaqus_batch(x_hf, fidelity="high"),
+            "y_hf": run_ansys_batch(x_hf, MESH_SIZE_HIGH),
         }
     finally:
         random.setstate(py_state)
@@ -537,62 +500,66 @@ def run_active_learning_section(args: Any, data: Dict[str, np.ndarray]) -> List[
     results: List[Dict[str, Any]] = []
     logger.info(f"{hue.b}Case Active Learning{hue.q}")
     x_initial = sample_lhs(args.bounds, args.num_active_initial)
-    y_initial_full = run_abaqus_batch(x_initial, fidelity="high")
+    y_initial_full = run_ansys_batch(x_initial, MESH_SIZE_HIGH)
+    work_dir = Path(tempfile.mkdtemp(prefix="surrogatelab_ansys_"))
+    hf_model = AnsysModel(work_dir=work_dir)
+    try:
+        for target in get_target_specs(args):
+            x_current = x_initial.copy()
+            y_current = select_output(y_initial_full, target["output_idx"]).copy()
+            y_test = select_output(data["y_test"], target["output_idx"])
 
-    for target in get_target_specs(args):
-        x_current = x_initial.copy()
-        y_current = select_output(y_initial_full, target["output_idx"]).copy()
-        y_test = select_output(data["y_test"], target["output_idx"])
+            model_before = fit_krg(x_current, y_current, args)
+            metrics_before = evaluate_metrics(y_test, predict_mean(model_before, data["x_test"]), eps=args.metric_eps)
 
-        model_before = fit_krg(x_current, y_current, args)
-        metrics_before = evaluate_metrics(y_test, predict_mean(model_before, data["x_test"]), eps=args.metric_eps)
+            history_best: List[float] = []
+            for _ in range(args.num_infill):
+                model_iter = fit_krg(x_current, y_current, args)
+                strategy = DISOInfill(
+                    model=model_iter,
+                    bounds=args.bounds,
+                    x_train=x_current,
+                    y_train=y_current,
+                    criterion=args.infill_criterion,
+                    target_idx=0,
+                    alpha=args.diso_alpha,
+                    min_distance=args.diso_min_distance,
+                    distance_scale=args.diso_distance_scale,
+                )
+                x_new = strategy.propose()
+                x4 = np.concatenate([x_new[0], [MESH_SIZE_HIGH]])
+                y_new_full = hf_model.run(x4)
+                y_new = y_new_full[target["output_idx"] : target["output_idx"] + 1].reshape(1, 1)
+                x_current = np.vstack([x_current, x_new])
+                y_current = np.vstack([y_current, y_new])
+                history_best.append(float(np.min(y_current[:, 0])))
 
-        history_best: List[float] = []
-        hf_model = AbaqusModel(fidelity="high")
-        for _ in range(args.num_infill):
-            model_iter = fit_krg(x_current, y_current, args)
-            strategy = DISOInfill(
-                model=model_iter,
-                bounds=args.bounds,
-                x_train=x_current,
-                y_train=y_current,
-                criterion=args.infill_criterion,
-                target_idx=0,
-                alpha=args.diso_alpha,
-                min_distance=args.diso_min_distance,
-                distance_scale=args.diso_distance_scale,
+            model_after = fit_krg(x_current, y_current, args)
+            metrics_after = evaluate_metrics(y_test, predict_mean(model_after, data["x_test"]), eps=args.metric_eps)
+            gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
+            passed = gain >= args.active_learning_min_relative_gain
+            status = "PASS" if passed else "FAIL"
+
+            logger.info(
+                f"  {target['label']} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
+                f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}% -> {status}"
             )
-            x_new = strategy.propose()
-            y_new_full = hf_model.run(x_new[0])
-            y_new = y_new_full[target["output_idx"] : target["output_idx"] + 1].reshape(1, 1)
-            x_current = np.vstack([x_current, x_new])
-            y_current = np.vstack([y_current, y_new])
-            history_best.append(float(np.min(y_current[:, 0])))
-
-        model_after = fit_krg(x_current, y_current, args)
-        metrics_after = evaluate_metrics(y_test, predict_mean(model_after, data["x_test"]), eps=args.metric_eps)
-        gain = compute_relative_gain(metrics_before["accuracy"], metrics_after["accuracy"], eps=args.metric_eps)
-        passed = gain >= args.active_learning_min_relative_gain
-        status = "PASS" if passed else "FAIL"
-
-        logger.info(
-            f"  {target['label']} | acc {metrics_before['accuracy']:.2f}% -> {metrics_after['accuracy']:.2f}% | "
-            f"r2 {metrics_before['r2']:.4f} -> {metrics_after['r2']:.4f} | gain={100.0 * gain:.2f}% -> {status}"
-        )
-        results.append(
-            {
-                "target": target["name"],
-                "algorithm": "DISO",
-                "criterion": args.infill_criterion,
-                "num_initial": int(args.num_active_initial),
-                "num_infill": args.num_infill,
-                "before": metrics_before,
-                "after": metrics_after,
-                "accuracy_gain": gain,
-                "history_best": history_best,
-                "passed": passed,
-            }
-        )
+            results.append(
+                {
+                    "target": target["name"],
+                    "algorithm": "DISO",
+                    "criterion": args.infill_criterion,
+                    "num_initial": int(args.num_active_initial),
+                    "num_infill": args.num_infill,
+                    "before": metrics_before,
+                    "after": metrics_after,
+                    "accuracy_gain": gain,
+                    "history_best": history_best,
+                    "passed": passed,
+                }
+            )
+    finally:
+        hf_model.close()
 
     return results
 
@@ -608,36 +575,61 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
     Returns:
         List[Dict[str, Any]]: Optimization records.
     """
-    objective_idx = case_config.TARGET_SPECS[args.opt_target]["output_idx"]
-    constraint_idx = case_config.TARGET_SPECS[args.opt_constraint_target]["output_idx"]
-    y_objective = select_output(data["y_train"], objective_idx)
-    y_constraint = select_output(data["y_train"], constraint_idx)
-    objective_model = fit_krg(data["x_train"], y_objective, args)
-    constraint_model = fit_krg(data["x_train"], y_constraint, args)
-    x0 = data["x_train"][np.argmin(y_objective[:, 0])]
-    objective = partial(predict_scalar_output, objective_model, 0)
-    constraint_fun = partial(predict_scalar_output, constraint_model, 0)
-    constraint = NonlinearConstraint(fun=constraint_fun, lb=-np.inf, ub=args.opt_constraint_ub)
+    mass_model = fit_krg(data["x_train"], select_output(data["y_train"], 0), args)
+    temperature_model = fit_krg(data["x_train"], select_output(data["y_train"], 2), args)
+    stress_model = fit_krg(data["x_train"], select_output(data["y_train"], 3), args)
+    x0 = data["x_train"][np.argmin(data["y_train"][:, 0])]
+
+    stress_constraint = NonlinearConstraint(
+        fun=partial(predict_scalar_output, stress_model, 0),
+        lb=-np.inf,
+        ub=args.opt_stress_ub,
+    )
+    if args.opt_mode == "single":
+        objective = partial(predict_scalar_output, mass_model, 0)
+        constraints = [
+            stress_constraint,
+            NonlinearConstraint(
+                fun=partial(predict_scalar_output, temperature_model, 0),
+                lb=-np.inf,
+                ub=args.opt_temperature_ub,
+            ),
+        ]
+    else:
+
+        def objective(x: np.ndarray) -> np.ndarray:
+            """Return the mass and temperature objectives. (2,)."""
+            x_vec = np.asarray(x, dtype=np.float64)
+            return np.asarray(
+                [
+                    predict_scalar_output(mass_model, 0, x_vec),
+                    predict_scalar_output(temperature_model, 0, x_vec),
+                ]
+            )
+
+        constraints = [stress_constraint]
 
     optimizers = {
         "MIGA": lambda: multi_island_genetic_optimize(
             func=objective,
             bounds=[tuple(bound) for bound in args.bounds],
-            constraints=constraint,
+            constraints=constraints,
             x0=x0,
             tol=args.opt_tol,
             seed=args.seed,
-            multi_objective=False,
+            multi_objective=args.opt_mode == "multi",
+            return_pareto=args.opt_mode == "multi",
             **args.miga_params,
         ),
         "CFARSSDA": lambda: dragonfly_optimize(
             func=objective,
             bounds=[tuple(bound) for bound in args.bounds],
-            constraints=constraint,
+            constraints=constraints,
             x0=x0,
             tol=args.opt_tol,
             seed=args.seed,
-            multi_objective=False,
+            multi_objective=args.opt_mode == "multi",
+            return_pareto=args.opt_mode == "multi",
             **args.df_params,
         ),
     }
@@ -649,12 +641,32 @@ def run_optimization_section(args: Any, data: Dict[str, np.ndarray]) -> List[Dic
         if algo_name not in args.demos:
             continue
 
-        builder()
-        record = {
-            "algorithm": algo_name,
-            "passed": True,
-        }
-        logger.info(f"  {algo_name} -> PASS")
+        result = builder()
+        if args.opt_mode == "single":
+            x_best = np.asarray(result.x, dtype=np.float64)
+            predicted_stress = predict_scalar_output(stress_model, 0, x_best)
+            predicted_temperature = predict_scalar_output(temperature_model, 0, x_best)
+            record = {
+                "algorithm": algo_name,
+                "opt_mode": args.opt_mode,
+                "x_best": x_best,
+                "predicted_mass": float(result.fun),
+                "predicted_stress": predicted_stress,
+                "predicted_temperature": predicted_temperature,
+                "stress_margin": args.opt_stress_ub - predicted_stress,
+                "temperature_margin": args.opt_temperature_ub - predicted_temperature,
+                "passed": True,
+            }
+        else:
+            record = {
+                "algorithm": algo_name,
+                "opt_mode": args.opt_mode,
+                "pareto_x": result.pareto_x,
+                "pareto_f": result.pareto_f,
+                "pareto_size": int(len(result.pareto_x)),
+                "passed": True,
+            }
+        logger.info(f"  {algo_name} / {args.opt_mode} -> PASS")
         results.append(record)
 
     return results
@@ -794,6 +806,11 @@ def run_case(args: Any) -> Dict[str, Any]:
             "ensemble_min_relative_gain": args.ensemble_min_relative_gain,
             "mf_min_accuracy": args.mf_min_accuracy,
             "active_learning_min_relative_gain": args.active_learning_min_relative_gain,
+        },
+        "optimization": {
+            "mode": args.opt_mode,
+            "stress_ub": args.opt_stress_ub,
+            "temperature_ub": args.opt_temperature_ub,
         },
         "summary": {
             "ensemble": {},

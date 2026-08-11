@@ -48,13 +48,14 @@ accuracy = (1 - sum(|GT - Pred|) / (sum(|GT|) + eps)) * 100%
 
 ### Engineering Case Suite
 
-- External solver: Abaqus 2022 through the `abq2022` command on `PATH`
-- Raw responses: `weight`, `displacement`, `stress_skin`, `stress_stiff`, and `inner_temperature`
-- Engineering targets: `weight` and `stress_skin`
-- 4 ensemble validation runs
-- 6 multi-fidelity validation runs
-- 2 single-objective active-learning validation runs with `DISO`
-- 2 constrained optimization runs with `stress_skin` as the objective and `weight <= 0.31` as the constraint
+- External solver: ANSYS Workbench through the `runwb2` command on `PATH`
+- Raw responses and engineering targets: `mass`, `total_deformation`, `temperature`, and `equivalent_stress`
+- Multi-fidelity mesh sizes: high fidelity `50 [mm]`, low fidelity `100 [mm]`
+- 8 ensemble validation runs (2 algorithms × 4 targets)
+- 12 multi-fidelity validation runs (3 algorithms × 4 targets)
+- 4 single-objective active-learning validation runs with `DISO`
+- 2 constrained optimization runs minimizing `mass` with `equivalent_stress <= 500 [MPa]` and `temperature <= 150 [C]`
+- 2 multi-objective optimization runs minimizing `[mass, temperature]` with `equivalent_stress <= 500 [MPa]`
 
 ## 🧱 Repository Layout
 
@@ -65,6 +66,9 @@ SurrogateLab/
 ├── bench_funcs.py
 ├── case_main.py
 ├── case_config.py
+├── jy_simulation.py
+├── jy.wbpj
+├── jy_files/
 ├── models/
 │   ├── classical/
 │   ├── ensemble/
@@ -110,8 +114,8 @@ This writes `bench_results.json` to the repository root.
 python case_main.py
 ```
 
-The engineering workflow requires a callable external `abq2022` executable. It fails immediately when Abaqus is not
-available; there is no local proxy fallback.
+The engineering workflow requires a callable external `runwb2` executable. It fails immediately when ANSYS Workbench is
+not available; there is no local proxy fallback.
 
 This writes `case_doe_cache.npy` and `case_results.json` to the repository root.
 
@@ -121,7 +125,7 @@ This writes `case_doe_cache.npy` and `case_results.json` to the repository root.
 python main.py
 ```
 
-The quality gate executes `case_main.py` before `bench_main.py`, so it has the same Abaqus requirement as the
+The quality gate executes `case_main.py` before `bench_main.py`, so it has the same ANSYS requirement as the
 engineering workflow.
 
 ### Run only the active-learning demos

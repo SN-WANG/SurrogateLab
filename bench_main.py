@@ -199,7 +199,7 @@ def build_mfs_mls_model(args: Any) -> MFSMLS:
         MFSMLS: Configured MFS-MLS model.
     """
     return MFSMLS(
-        poly_degree=1,
+        poly_degree=args.mf_poly_degree,
         neighbor_factor=args.mfs_mls_neighbor_factor,
         ridge=args.mfs_mls_ridge,
     )
@@ -477,7 +477,7 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
     """
     model_builders: Dict[str, Callable[[], Any]] = {
         "MFSMLS": lambda: build_mfs_mls_model(args),
-        "MMFS": lambda: MMFS(),
+        "MMFS": lambda: MMFS(sigma_bounds=tuple(args.mf_sigma_bounds)),
         "CCAMFS": lambda: CCAMFS(),
     }
 

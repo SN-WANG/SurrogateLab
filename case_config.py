@@ -21,15 +21,25 @@ ALGORITHM_ORDER = ["TAHS", "AESMSI", "MFSMLS", "MMFS", "CCAMFS", "DISO", "MIGA",
 
 TARGET_SPECS = OrderedDict(
     {
-        "weight": {
+        "mass": {
             "output_idx": 0,
-            "label": "weight",
-            "description": "Structural weight response.",
+            "label": "mass",
+            "description": "Total structural mass response.",
         },
-        "stress_skin": {
+        "total_deformation": {
+            "output_idx": 1,
+            "label": "total_deformation",
+            "description": "Maximum total deformation response.",
+        },
+        "temperature": {
             "output_idx": 2,
-            "label": "stress_skin",
-            "description": "Outer skin stress response.",
+            "label": "temperature",
+            "description": "Inner surface maximum temperature response.",
+        },
+        "equivalent_stress": {
+            "output_idx": 3,
+            "label": "equivalent_stress",
+            "description": "Rib-plate maximum equivalent stress response.",
         },
     }
 )
@@ -41,11 +51,11 @@ TARGET_SPECS = OrderedDict(
 
 DESIGN_SPACE = {
     "num_features": 3,
-    "num_outputs": 5,
+    "num_outputs": 4,
     "bounds_lower": [4.0, 4.0, 4.0],
     "bounds_upper": [10.0, 10.0, 10.0],
-    "input_names": ["sic_thick", "aerogel_thick", "ti65_thick"],
-    "output_names": ["weight", "displacement", "stress_skin", "stress_stiff", "inner_temperature"],
+    "input_names": ["ti65_thick", "aerogel_thick", "sic_thick"],
+    "output_names": ["mass", "total_deformation", "temperature", "equivalent_stress"],
 }
 
 
@@ -110,7 +120,12 @@ def get_args() -> argparse.Namespace:
         default=list(ALGORITHM_ORDER),
         help="Algorithms to run: TAHS AESMSI MFSMLS MMFS CCAMFS DISO MIGA CFARSSDA.",
     )
-    general.add_argument("--targets", nargs="+", default=["all"], help="Engineering targets: weight / stress_skin / all.")
+    general.add_argument(
+        "--targets",
+        nargs="+",
+        default=["all"],
+        help="Engineering targets: mass / total_deformation / temperature / equivalent_stress / all.",
+    )
 
     # ============================================================
     # Design Space
@@ -265,24 +280,23 @@ def get_args() -> argparse.Namespace:
 
     optim = parser.add_argument_group("Optimization")
     optim.add_argument(
-        "--opt_target",
+        "--opt_mode",
         type=str,
-        default="stress_skin",
-        choices=list(TARGET_SPECS.keys()),
-        help="Optimization objective output.",
+        default="single",
+        choices=["single", "multi"],
+        help="single minimizes mass under stress and temperature constraints; multi minimizes mass and temperature.",
     )
     optim.add_argument(
-        "--opt_constraint_target",
-        type=str,
-        default="weight",
-        choices=list(TARGET_SPECS.keys()),
-        help="Constraint output.",
-    )
-    optim.add_argument(
-        "--opt_constraint_ub",
+        "--opt_stress_ub",
         type=float,
-        default=0.31,
-        help="Upper bound for the optimization constraint.",
+        default=500.0,
+        help="Ti65 high-temperature allowable stress in MPa.",
+    )
+    optim.add_argument(
+        "--opt_temperature_ub",
+        type=float,
+        default=150.0,
+        help="Allowable inner-surface temperature in C.",
     )
     optim.add_argument("--miga_popsize", type=int, default=10, help="MIGA population multiplier.")
     optim.add_argument("--miga_maxiter", type=int, default=50, help="Maximum MIGA iterations.")

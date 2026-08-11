@@ -196,10 +196,23 @@ def get_args() -> argparse.Namespace:
         help="Neighborhood expansion factor used by MFS-MLS local fitting.",
     )
     multifidelity.add_argument(
+        "--mf_poly_degree",
+        type=int,
+        default=2,
+        help="Polynomial degree for MFSMLS.",
+    )
+    multifidelity.add_argument(
         "--mfs_mls_ridge",
         type=float,
         default=1.0e-4,
         help="Ridge regularization used by MFS-MLS local fitting.",
+    )
+    multifidelity.add_argument(
+        "--mf_sigma_bounds",
+        type=float,
+        nargs=2,
+        default=[0.01, 10.0],
+        help="Sigma bounds for MMFS.",
     )
 
     # ============================================================
@@ -246,7 +259,7 @@ def get_args() -> argparse.Namespace:
     optimization.add_argument(
         "--miga_maxiter",
         type=int,
-        default=30,
+        default=50,
         help="Maximum MIGA iterations.",
     )
     optimization.add_argument(
@@ -276,7 +289,7 @@ def get_args() -> argparse.Namespace:
     optimization.add_argument(
         "--df_maxiter",
         type=int,
-        default=50,
+        default=120,
         help="Maximum CFARSSDA iterations.",
     )
     optimization.add_argument("--opt_tol", type=float, default=1.0e-6, help="Stopping tolerance for the optimizers.")
