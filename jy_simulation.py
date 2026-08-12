@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -224,6 +225,21 @@ def _prefer_runwb2_bat(path: Path) -> Path:
     return path
 
 
+def _project_version_key() -> str:
+    """
+    Read the ANSYS framework version from the jy project file.
+
+    Returns:
+        str: Version key such as "241" for framework build 24.1, empty when unknown.
+    """
+    project_file = Path(__file__).resolve().parent / "jy.wbpj"
+    match = re.search(
+        r"<framework-build-version[^>]*>(\d+)\.(\d+)\.",
+        project_file.read_text(encoding="utf-8-sig", errors="ignore"),
+    )
+    return f"{match.group(1)}{match.group(2)}" if match else ""
+
+
 def find_runwb2() -> str:
     """
     Locate the ANSYS Workbench batch launcher.
@@ -234,22 +250,42 @@ def find_runwb2() -> str:
     Raises:
         RuntimeError: If ANSYS Workbench cannot be found.
     """
-    command = shutil.which("runwb2")
-    if command is not None:
-        return str(_prefer_runwb2_bat(Path(command)))
-
     env_command = os.environ.get("ANSYS_RUNWB2")
     if env_command and Path(env_command).is_file():
         return str(_prefer_runwb2_bat(Path(env_command)))
 
+    preferred = _project_version_key()
+
+    def version_key(path: Path) -> str:
+        """Extract the ANSYS version key from an install path."""
+        match = re.search(r"v(\d{3})", str(path))
+        return match.group(1) if match else ""
+
+    command = shutil.which("runwb2")
+    path_command = Path(command) if command is not None else None
+    if path_command is not None and (not preferred or version_key(path_command) == preferred):
+        return str(_prefer_runwb2_bat(path_command))
+
     is_windows = os.name == "nt"
     bin_dir = "Win64" if is_windows else "Linux64"
     exe_name = "runwb2.exe" if is_windows else "runwb2"
-    for env_name, env_value in os.environ.items():
-        if env_name.startswith("AWP_ROOT") and env_value:
-            candidate = Path(env_value) / "Framework" / "bin" / bin_dir / exe_name
-            if candidate.is_file():
-                return str(_prefer_runwb2_bat(candidate))
+
+    def locate(root: Path):
+        """Locate runwb2 below one ANSYS installation root."""
+        candidate = root / "Framework" / "bin" / bin_dir / exe_name
+        if candidate.is_file():
+            return str(_prefer_runwb2_bat(candidate))
+        return None
+
+    awp_roots = [
+        (env_name, Path(env_value))
+        for env_name, env_value in os.environ.items()
+        if env_name.startswith("AWP_ROOT") and env_value
+    ]
+    for env_name, root in sorted(awp_roots, key=lambda item: (version_key(item[1]) != preferred, item[0])):
+        found = locate(root)
+        if found:
+            return found
 
     program_files = [
         Path(os.environ.get("ProgramFiles", "C:/Program Files")),
@@ -259,10 +295,17 @@ def find_runwb2() -> str:
         ansys_dir = base / "ANSYS Inc"
         if not ansys_dir.is_dir():
             continue
-        for version_dir in sorted(ansys_dir.glob("v*")):
-            candidate = version_dir / "Framework" / "bin" / bin_dir / exe_name
-            if candidate.is_file():
-                return str(_prefer_runwb2_bat(candidate))
+        version_dirs = sorted(
+            ansys_dir.glob("v*"),
+            key=lambda item: (version_key(item) != preferred, item.name),
+        )
+        for version_dir in version_dirs:
+            found = locate(version_dir)
+            if found:
+                return found
+
+    if path_command is not None:
+        return str(_prefer_runwb2_bat(path_command))
 
     raise RuntimeError(
         "External ANSYS solver 'runwb2' was not found. Install ANSYS Workbench, add it to PATH, "
