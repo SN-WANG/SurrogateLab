@@ -16,6 +16,7 @@ import numpy as np
 
 MESH_SIZE_HIGH = 50.0
 MESH_SIZE_LOW = 100.0
+BATCH_CHUNK_SIZE = 5
 
 INPUT_IDS = ["P1", "P2", "P3", "P9"]
 OUTPUT_IDS = ["P8", "P5", "P6", "P7"]
@@ -182,7 +183,8 @@ class AnsysModel:
                 stderr=subprocess.STDOUT,
             )
         if completed.returncode != 0:
-            raise RuntimeError(f"runwb2 returned {completed.returncode}; see {log_path}")
+            tail = "".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[-40:])
+            raise RuntimeError(f"runwb2 returned {completed.returncode};\n{tail}")
 
     def _read_results(self, results_path: Path, num_rows: int) -> np.ndarray:
         """
@@ -327,22 +329,27 @@ def require_external_solver() -> Dict[str, str]:
     return {"solver": "ansys", "command_name": command_name}
 
 
-def run_ansys_batch(x: np.ndarray, mesh_size: float) -> np.ndarray:
+def run_ansys_batch(x: np.ndarray, mesh_size: float, chunk_size: int = BATCH_CHUNK_SIZE) -> np.ndarray:
     """
     Evaluate a thickness DOE batch at one mesh size.
 
     Args:
         x (np.ndarray): Thickness design matrix. (N, 3).
         mesh_size (float): Element size in mm.
+        chunk_size (int): Design points per Workbench session to bound solver memory.
 
     Returns:
         np.ndarray: Response matrix. (N, 4).
     """
     x = np.asarray(x, dtype=np.float64)
     x_full = np.hstack([x, np.full((x.shape[0], 1), float(mesh_size))])
-    with tempfile.TemporaryDirectory(prefix="surrogatelab_ansys_") as tmp_dir:
-        model = AnsysModel(work_dir=Path(tmp_dir))
-        return model.run_batch(x_full)
+    chunks = [x_full[start : start + chunk_size] for start in range(0, x_full.shape[0], chunk_size)]
+    rows = []
+    for chunk in chunks:
+        with tempfile.TemporaryDirectory(prefix="surrogatelab_ansys_") as tmp_dir:
+            model = AnsysModel(work_dir=Path(tmp_dir))
+            rows.append(model.run_batch(chunk))
+    return np.vstack(rows)
 
 
 def main() -> None:
