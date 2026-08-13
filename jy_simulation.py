@@ -16,7 +16,7 @@ import numpy as np
 
 MESH_SIZE_HIGH = 50.0
 MESH_SIZE_LOW = 100.0
-BATCH_CHUNK_SIZE = 5
+BATCH_CHUNK_SIZE = 3
 
 INPUT_IDS = ["P1", "P2", "P3", "P9"]
 OUTPUT_IDS = ["P8", "P5", "P6", "P7"]
