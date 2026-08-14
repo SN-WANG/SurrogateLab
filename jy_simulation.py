@@ -2,6 +2,7 @@
 # Author: Shengning Wang
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -16,13 +17,15 @@ import numpy as np
 
 MESH_SIZE_HIGH = 50.0
 MESH_SIZE_LOW = 100.0
-BATCH_CHUNK_SIZE = 3
+BATCH_CHUNK_SIZE = 1
 
 INPUT_IDS = ["P1", "P2", "P3", "P9"]
 OUTPUT_IDS = ["P8", "P5", "P6", "P7"]
 
 INPUT_NAMES = ["ti65", "aerogel", "sic", "mesh_size"]
 OUTPUT_NAMES = ["mass", "total_deformation", "temperature", "equivalent_stress"]
+
+SYSTEM_NAMES = ["SYS 1", "SYS 2"]
 
 
 class AnsysModel:
@@ -57,6 +60,9 @@ class AnsysModel:
         """
         Evaluate a batch of design points in one Workbench session.
 
+        Each design point is applied to design point 0, the analysis systems are
+        updated, and the parameterized design point table is exported to CSV.
+
         Args:
             x (np.ndarray): Design matrix. (N, 4).
 
@@ -65,12 +71,11 @@ class AnsysModel:
         """
         x = np.asarray(x, dtype=np.float64)
         self._prepare_project()
-        results_path = self.work_dir / "results.txt"
-        results_path.unlink(missing_ok=True)
+        csv_paths = [self.work_dir / f"design_point_{idx}.csv" for idx in range(x.shape[0])]
         journal_path = self.work_dir / "run_batch.wbjn"
-        journal_path.write_text(self._build_journal(x, results_path), encoding="utf-8")
+        journal_path.write_text(self._build_journal(x, csv_paths), encoding="utf-8")
         self._run_workbench(journal_path)
-        return self._read_results(results_path, x.shape[0])
+        return self._read_exported_results(csv_paths, x.shape[0])
 
     def probe(self) -> List[List[str]]:
         """
@@ -115,19 +120,19 @@ class AnsysModel:
         shutil.copytree(self.project_dir, self.work_dir / self.project_dir.name)
         self._prepared = True
 
-    def _build_journal(self, x: np.ndarray, results_path: Path) -> str:
+    def _build_journal(self, x: np.ndarray, csv_paths: List[Path]) -> str:
         """
         Build the Workbench journal for a design batch.
 
         Args:
             x (np.ndarray): Design matrix. (N, 4).
-            results_path (Path): Result text file written by the journal.
+            csv_paths (List[Path]): CSV export path per design point.
 
         Returns:
             str: Journal source.
         """
         project_path = json.dumps(str((self.work_dir / self.project_file.name).resolve()))
-        results_path_str = json.dumps(str(results_path.resolve()))
+        exported_paths = [json.dumps(str(path.resolve())) for path in csv_paths]
         rows = json.dumps(x.tolist())
         lines = [
             "# encoding: utf-8",
@@ -140,20 +145,18 @@ class AnsysModel:
             'p9 = Parameters.GetParameter(Name="P9")',
             'dp0 = Parameters.GetDesignPoint(Name="0")',
             f"rows = {rows}",
-            f"out = open({results_path_str}, 'a')",
-            "for row in rows:",
+            f"csv_paths = [{', '.join(exported_paths)}]",
+            "for idx in range(len(rows)):",
+            "    row = rows[idx]",
             '    dp0.SetParameterExpression(Parameter=p1, Expression="{0} [mm]".format(row[0]))',
             '    dp0.SetParameterExpression(Parameter=p2, Expression="{0} [mm]".format(row[1]))',
             '    dp0.SetParameterExpression(Parameter=p3, Expression="{0} [mm]".format(row[2]))',
             '    dp0.SetParameterExpression(Parameter=p9, Expression="{0} [mm]".format(row[3]))',
-            "    UpdateAllDesignPoints(DesignPoints=[dp0])",
-            '    out.write("{0},{1},{2},{3}\\n".format(',
-            '        float(Parameters.GetParameter(Name="P8").Value.Value),',
-            '        float(Parameters.GetParameter(Name="P5").Value.Value),',
-            '        float(Parameters.GetParameter(Name="P6").Value.Value),',
-            '        float(Parameters.GetParameter(Name="P7").Value.Value)))',
-            "out.close()",
-            "Save(Overwrite=True)",
+            '    system_thermal = GetSystem(Name="SYS 1")',
+            "    system_thermal.Update(AllDependencies=True)",
+            '    system_structural = GetSystem(Name="SYS 2")',
+            "    system_structural.Update(AllDependencies=True)",
+            "    Parameters.ExportAllDesignPointsData(FilePath=csv_paths[idx])",
         ]
         return "\n".join(lines)
 
@@ -186,27 +189,53 @@ class AnsysModel:
             tail = "".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[-40:])
             raise RuntimeError(f"runwb2 returned {completed.returncode};\n{tail}")
 
-    def _read_results(self, results_path: Path, num_rows: int) -> np.ndarray:
+    def _read_exported_results(self, csv_paths: List[Path], num_rows: int) -> np.ndarray:
         """
-        Read response rows written by the journal.
+        Read response rows from the exported design point tables.
 
         Args:
-            results_path (Path): Result text file.
+            csv_paths (List[Path]): CSV export path per design point.
             num_rows (int): Expected number of rows.
 
         Returns:
             np.ndarray: Response matrix. (N, 4).
         """
-        rows: List[List[float]] = []
-        with open(results_path, "r", encoding="utf-8") as file:
-            for line in file:
-                parts = line.strip().split(",")
-                if len(parts) == 4:
-                    rows.append([float(part) for part in parts])
+        rows = [self._read_design_point_csv(path) for path in csv_paths]
         data = np.asarray(rows, dtype=np.float64)
         if data.shape[0] != num_rows:
             raise RuntimeError(f"Expected {num_rows} result rows, got {data.shape[0]}.")
         return data
+
+    def _read_design_point_csv(self, path: Path) -> List[float]:
+        """
+        Parse one exported design point table and return output values.
+
+        Args:
+            path (Path): CSV exported by ExportAllDesignPointsData.
+
+        Returns:
+            List[float]: Output values in OUTPUT_IDS order.
+        """
+        with open(path, newline="", encoding="utf-8-sig") as file:
+            rows = list(csv.reader(file))
+        header_idx = next(
+            idx for idx, row in enumerate(rows)
+            if any(re.search(rf"\b{param_id}\b", cell) for param_id in OUTPUT_IDS for cell in row)
+        )
+        header = rows[header_idx]
+        columns = {
+            param_id: next(
+                col for col, cell in enumerate(header)
+                if re.search(rf"\b{param_id}\b", cell)
+            )
+            for param_id in OUTPUT_IDS
+        }
+        data_rows = [row for row in rows[header_idx + 1:] if any(cell.strip() for cell in row)]
+        values_row = data_rows[-1]
+        return [
+            float(re.match(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", values_row[columns[param_id]]).group())
+            for param_id in OUTPUT_IDS
+        ]
 
 
 def _prefer_runwb2_bat(path: Path) -> Path:

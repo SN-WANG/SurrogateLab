@@ -111,7 +111,7 @@ def get_args() -> argparse.Namespace:
     # ============================================================
 
     general = parser.add_argument_group("General")
-    general.add_argument("--seed", type=int, default=31, help="Random seed.")
+    general.add_argument("--seed", type=int, default=7, help="Random seed.")
     general.add_argument("--seed_mode", type=str, default="single_seed", help="Run mode written into payload metadata.")
     general.add_argument(
         "--demos",
