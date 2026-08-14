@@ -65,7 +65,7 @@ DESIGN_SPACE = {
 
 SAMPLE_COUNTS = {
     "num_train": 30,
-    "num_test": 50,
+    "num_test": 20,
     "num_lf": 30,
     "num_hf": 15,
     "num_active_initial": 2,

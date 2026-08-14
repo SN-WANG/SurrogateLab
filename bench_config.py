@@ -20,17 +20,17 @@ SEEDS = list(range(1, 11))
 
 ENSEMBLE_CASES = OrderedDict(
     {
-        "forrester": {"num_train": 10, "num_test": 200},
-        "hartman3": {"num_train": 30, "num_test": 200},
-        "rosenbrock5": {"num_train": 50, "num_test": 200},
+        "forrester": {"num_train": 10, "num_test": 50},
+        "hartman3": {"num_train": 30, "num_test": 50},
+        "rosenbrock5": {"num_train": 50, "num_test": 50},
     }
 )
 
 MULTIFIDELITY_CASES = OrderedDict(
     {
-        "borehole": {"num_lf": 80, "num_hf": 40, "num_test": 200},
-        "currin_exponential": {"num_lf": 20, "num_hf": 10, "num_test": 200},
-        "park91b": {"num_lf": 40, "num_hf": 20, "num_test": 200},
+        "borehole": {"num_lf": 80, "num_hf": 40, "num_test": 50},
+        "currin_exponential": {"num_lf": 20, "num_hf": 10, "num_test": 50},
+        "park91b": {"num_lf": 40, "num_hf": 20, "num_test": 50},
     }
 )
 
@@ -38,7 +38,7 @@ ACTIVE_LEARNING_CASES = {
     "single_objective": {
         "name": "branin",
         "num_initial": 2,
-        "num_test": 200,
+        "num_test": 50,
         "num_infill": 14,
         "criterion": "ei",
     },
@@ -46,14 +46,14 @@ ACTIVE_LEARNING_CASES = {
         "name": "currin_exponential",
         "num_hf_initial": 2,
         "num_lf": 20,
-        "num_test": 200,
+        "num_test": 50,
         "num_infill": 14,
         "ratio": 0.5,
     },
     "multi_objective": {
         "name": "vlmop2",
         "num_initial": 2,
-        "num_test": 200,
+        "num_test": 50,
         "num_infill": 14,
         "num_samples": 3000,
         "num_candidates": 120,

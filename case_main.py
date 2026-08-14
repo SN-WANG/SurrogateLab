@@ -7,7 +7,7 @@ import random
 import tempfile
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from scipy.optimize import NonlinearConstraint
@@ -81,6 +81,29 @@ def sample_lhs(bounds: np.ndarray, num_samples: int, seed: int | None = None) ->
         finally:
             np.random.set_state(state)
     return scale_to_bounds(x_norm, bounds)
+
+
+def split_lhs(bounds: np.ndarray, num_train: int, num_test: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a single latin hypercube and split it into train and test sets.
+
+    Args:
+        bounds (np.ndarray): Box bounds. (D, 2).
+        num_train (int): Number of training samples.
+        num_test (int): Number of test samples.
+        seed (int): Random seed for LHS generation and split.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Train and test samples.
+    """
+    x_pool = sample_lhs(bounds, num_train + num_test, seed=seed)
+    state = np.random.get_state()
+    np.random.seed(seed + 1)
+    try:
+        indices = np.random.permutation(num_train + num_test)
+    finally:
+        np.random.set_state(state)
+    return x_pool[indices[:num_train]], x_pool[indices[num_train:]]
 
 
 def reset_random_state(seed: int) -> None:
@@ -289,6 +312,7 @@ def build_cache_meta(args: Any) -> Dict[str, Any]:
         "num_test": args.num_test,
         "num_lf": args.num_lf,
         "num_hf": args.num_hf,
+        "num_active_initial": args.num_active_initial,
     }
 
 
@@ -314,8 +338,17 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
         logger.info(f"{hue.y}Case DOE cache metadata changed, regenerate {cache_path}{hue.q}")
 
     logger.info(f"{hue.b}Generate case DOE data{hue.q}")
-    x_train = sample_lhs(args.bounds, args.num_train, seed=args.doe_seed)
-    x_test = sample_lhs(args.bounds, args.num_test, seed=args.doe_seed + 1)
+    num_total = args.num_train + args.num_test + args.num_active_initial
+    x_pool = sample_lhs(args.bounds, num_total, seed=args.doe_seed)
+    state = np.random.get_state()
+    np.random.seed(args.doe_seed + 1)
+    try:
+        indices = np.random.permutation(num_total)
+    finally:
+        np.random.set_state(state)
+    x_train = x_pool[indices[: args.num_train]]
+    x_test = x_pool[indices[args.num_train : args.num_train + args.num_test]]
+    x_active_initial = x_pool[indices[args.num_train + args.num_test :]]
     x_lf = sample_lhs(args.bounds, args.num_lf, seed=args.doe_seed + 2)
     x_hf = sample_lhs(args.bounds, args.num_hf, seed=args.doe_seed + 3)
 
@@ -335,6 +368,8 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
             "y_lf": run_ansys_batch(x_lf, MESH_SIZE_LOW),
             "x_hf": x_hf,
             "y_hf": run_ansys_batch(x_hf, MESH_SIZE_HIGH),
+            "x_active_initial": x_active_initial,
+            "y_active_initial": run_ansys_batch(x_active_initial, MESH_SIZE_HIGH),
         }
     finally:
         random.setstate(py_state)
@@ -343,7 +378,8 @@ def generate_case_doe(args: Any) -> Dict[str, np.ndarray]:
     np.save(cache_path, data, allow_pickle=True)
     logger.info(
         f"  train={data['x_train'].shape} | test={data['x_test'].shape} | "
-        f"lf={data['x_lf'].shape} | hf={data['x_hf'].shape}"
+        f"lf={data['x_lf'].shape} | hf={data['x_hf'].shape} | "
+        f"active_initial={data['x_active_initial'].shape}"
     )
     return data
 
@@ -499,8 +535,8 @@ def run_active_learning_section(args: Any, data: Dict[str, np.ndarray]) -> List[
     """
     results: List[Dict[str, Any]] = []
     logger.info(f"{hue.b}Case Active Learning{hue.q}")
-    x_initial = sample_lhs(args.bounds, args.num_active_initial)
-    y_initial_full = run_ansys_batch(x_initial, MESH_SIZE_HIGH)
+    x_initial = data["x_active_initial"]
+    y_initial_full = data["y_active_initial"]
     work_dir = Path(tempfile.mkdtemp(prefix="surrogatelab_ansys_"))
     hf_model = AnsysModel(work_dir=work_dir)
     try:

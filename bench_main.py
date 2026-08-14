@@ -6,7 +6,7 @@ import json
 import os
 import random
 from statistics import mean
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 
@@ -63,6 +63,23 @@ def sample_lhs(bounds: np.ndarray, num_samples: int) -> np.ndarray:
     """
     x_norm = lhs_design(num_samples, bounds.shape[0])
     return scale_to_bounds(x_norm, bounds)
+
+
+def split_lhs(bounds: np.ndarray, num_train: int, num_test: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a single latin hypercube and split it into train and test sets.
+
+    Args:
+        bounds (np.ndarray): Box bounds. (D, 2).
+        num_train (int): Number of training samples.
+        num_test (int): Number of test samples.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Train and test samples.
+    """
+    x_pool = sample_lhs(bounds, num_train + num_test)
+    indices = np.random.permutation(num_train + num_test)
+    return x_pool[indices[:num_train]], x_pool[indices[num_train:]]
 
 
 def reset_random_state(seed: int) -> None:
@@ -422,8 +439,7 @@ def run_ensemble_section(args: Any) -> List[Dict[str, Any]]:
         config = bench_config.ENSEMBLE_CASES[case_name]
         bounds = spec.bounds_array
 
-        x_train = sample_lhs(bounds, config["num_train"])
-        x_test = sample_lhs(bounds, config["num_test"])
+        x_train, x_test = split_lhs(bounds, config["num_train"], config["num_test"])
         y_train = spec.evaluate(x_train)
         y_test = spec.evaluate(x_test)
 
@@ -491,8 +507,7 @@ def run_multifidelity_section(args: Any) -> List[Dict[str, Any]]:
         bounds = spec.bounds_array
 
         x_lf = sample_lhs(bounds, config["num_lf"])
-        x_hf = sample_lhs(bounds, config["num_hf"])
-        x_test = sample_lhs(bounds, config["num_test"])
+        x_hf, x_test = split_lhs(bounds, config["num_hf"], config["num_test"])
         y_lf = spec.evaluate_low_fidelity(x_lf)
         y_hf = spec.evaluate_high_fidelity(x_hf)
         y_test = spec.evaluate_high_fidelity(x_test)
@@ -541,8 +556,7 @@ def run_single_objective_active_case(args: Any) -> Dict[str, Any]:
     spec = bench_funcs.get_scalar_benchmark(config["name"])
     bounds = spec.bounds_array
 
-    x_current = sample_lhs(bounds, config["num_initial"])
-    x_test = sample_lhs(bounds, config["num_test"])
+    x_current, x_test = split_lhs(bounds, config["num_initial"], config["num_test"])
     y_current = spec.evaluate(x_current)
     y_test = spec.evaluate(x_test)
 
@@ -612,8 +626,7 @@ def run_multi_fidelity_active_case(args: Any) -> Dict[str, Any]:
     bounds = spec.bounds_array
 
     x_lf = sample_lhs(bounds, config["num_lf"])
-    x_test = sample_lhs(bounds, config["num_test"])
-    x_current = sample_lhs(bounds, config["num_hf_initial"])
+    x_current, x_test = split_lhs(bounds, config["num_hf_initial"], config["num_test"])
     y_lf = spec.evaluate_low_fidelity(x_lf)
     y_current = spec.evaluate_high_fidelity(x_current)
     y_test = spec.evaluate_high_fidelity(x_test)
@@ -682,8 +695,7 @@ def run_multi_objective_active_case(args: Any) -> Dict[str, Any]:
     spec = bench_funcs.get_multiobjective_benchmark(config["name"])
     bounds = spec.bounds_array
 
-    x_current = sample_lhs(bounds, config["num_initial"])
-    x_test = sample_lhs(bounds, config["num_test"])
+    x_current, x_test = split_lhs(bounds, config["num_initial"], config["num_test"])
     y_current = spec.evaluate(x_current)
     y_test = spec.evaluate(x_test)
 
